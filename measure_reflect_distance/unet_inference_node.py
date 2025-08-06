@@ -7,13 +7,19 @@ import torch
 import torchvision.transforms as T
 import cv2
 import numpy as np
+import os
+
+from .unet_model import UNet
  
  
 class UNetInferenceNode(Node):
     def __init__(self):
         super().__init__("unet_inference_node")
         self.bridge = CvBridge()
-        self.model = torch.load('~/U-Net/U-Net_model/20250726/mirror/best.pt', map_location=torch.device('cuda:0'))
+        self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
+        model_path = os.path.expanduser('~/U-Net/U-Net_model/20250726/mirror/best.pt')
+        state_dict = torch.load(model_path, map_location=torch.device('cuda:0'), weights_only=True)
+        self.model.load_state_dict(state_dict)
         self.model.eval().cuda()
 
         self.subscription = self.create_subscription(
@@ -22,6 +28,13 @@ class UNetInferenceNode(Node):
             self.image_callback, 
             10
         )
+        # 画像をリサイズし、正規化
+        self.transform = T.Compose([
+            T.ToPILImage(),
+            T.Resize((512, 512)),
+            T.ToTensor(),
+            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+        ])
 
         self.publisher_ = self.create_publisher(Image, '/mask_image', 10)
     
@@ -47,15 +60,8 @@ class UNetInferenceNode(Node):
         self.publisher_.publish(output_msg)
     
     def preprocess(self, image):
-        # 画像をリサイズし、正規化
-        transform = T.Compose([
-            T.ToPILImage(),
-            T.Resize((512, 512)),
-            T.ToTensor(),
-            T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-        ])
-        return transform(image)
-    
+        return self.transform(image)
+
     def postprocess(self, output_tensor, orig_size):
         logits = output_tensor.squeeze(0).cpu()
         if logits.ndim == 2:
