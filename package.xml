@@ -8,6 +8,13 @@
   <license>TODO: License declaration</license>
 
   <depend>rclpy</depend>
+  <depend>sensor_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>torch</depend>
+  <depend>torchvision</depend>
+  <depend>numpy</depend>
+  <depend>opencv-python</depend>
+  
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>

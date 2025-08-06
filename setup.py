@@ -20,7 +20,8 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'my_node = measure_reflect_distance.my_node:main'
+            'my_node = measure_reflect_distance.my_node:main',
+            'unet_inference_node = measure_reflect_distance.unet_inference_node:main',
         ],
     },
 )
