@@ -43,13 +43,20 @@ class UNetInferenceNode(Node):
         cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
         H, W = cv_image.shape[:2]
 
+        rgb_image = cv2.cvtColor(cv_image, cv2.COLOR_BGR2RGB)
+
         # 前処理
-        input_tensor = self.preprocess(cv_image).unsqueeze(0).cuda()
+        input_tensor = self.preprocess(rgb_image).unsqueeze(0).cuda()
 
         # 推論
         with torch.no_grad():
             output = self.model(input_tensor)
         
+        min_val = output.min().item()
+        max_val = output.max().item()
+        mean_val = output.mean().item()
+        self.get_logger().info(f"Model Output Stats -> Min: {min_val:.4f}, Max: {max_val:.4f}, Mean: {mean_val:.4f}")
+
         # 後処理
         output_mask = self.postprocess(output, (W, H))
 
@@ -63,14 +70,11 @@ class UNetInferenceNode(Node):
         return self.transform(image)
 
     def postprocess(self, output_tensor, orig_size):
-        logits = output_tensor.squeeze(0).cpu()
-        if logits.ndim == 2:
-            prob = torch.sigmoid(logits)
-            mask = (prob > 0.5).numpy().astype(np.uint8)
-        else:
-            mask = torch.argmax(logits, dim=0).numpy().astype(np.uint8)
-        
-        mask = (mask * 255).astype(np.uint8)  # 0-1を0-255に変換
+        prob = output_tensor.squeeze().cpu()
+
+        mask = (prob > 0.5).numpy().astype(np.uint8)
+
+        mask = mask * 255  # 0-1を0-255に変換
         mask = cv2.resize(mask, orig_size, interpolation=cv2.INTER_NEAREST)
         return mask
 
