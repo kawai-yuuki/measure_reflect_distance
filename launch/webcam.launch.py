@@ -25,6 +25,7 @@ def generate_launch_description():
                 # 利用可能なフォーマットは `v4l2-ctl --list-formats-ext` で確認
                 {'pixel_format': 'YUYV'},                 # ピクセルフォーマット (例: 'YUYV', 'MJPG')
                 {'image_size': [640, 480]},               # [幅, 高さ]
+                {'framerate': 30.0},                      # フレームレート
 
                 # ===================================
                 # V4L2コントロール (V4L2 Controls)
