@@ -19,7 +19,10 @@ class UNetInferenceNode(Node):
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
-        model_path = os.path.expanduser('~/U-Net/U-Net_model/20250726/mirror/best.pt')
+        # このスクリプト自身のディレクトリを取得
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # モデルへの絶対パスを生成
+        model_path = os.path.join(script_dir, 'U-Net_model', 'best.pt')
 
         state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state_dict)
