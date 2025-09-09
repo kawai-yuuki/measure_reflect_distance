@@ -20,7 +20,7 @@ def generate_launch_description():
             'align_depth.enable': 'true',
             'enable_gyro': 'true',
             'enable_accel': 'true',
-            'unite_imu_method': '1',
+            'unite_imu_method': '2',
             'enable_sync': 'true',
             "rgb_camera.color_profile": '640x480x30',
             "depth_module.depth_profile": '640x480x30',
