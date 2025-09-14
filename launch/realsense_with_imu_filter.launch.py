@@ -23,7 +23,26 @@ def generate_launch_description():
             'unite_imu_method': '2',
             'enable_sync': 'true',
             "rgb_camera.color_profile": '640x480x30',
-            "depth_module.depth_profile": '640x480x30',
+            "depth_module.depth_profile": '848x480x30',
+            "colorizer.enable": 'true',
+
+            "hole_filling_filter.enable": 'true',
+            "hole_filling_filter.holes_fill": '1',
+
+            "decimation_filter.enable": 'true',
+            "decimation_filter.decimation_magnitude": '2',
+
+            "temporal_filter.enable": 'true',
+            "temporal_filter.holes_fill": '0',
+            "temporal_filter.smooth_alpha": '0.2',
+            "temporal_filter.smooth_delta": '80',
+            "temporal_filter.persistency_index": '3',
+
+            "spatial_filter.enable": 'true',
+            "spatial_filter.holes_fill": '0',
+            "spatial_filter.magnitude": '2',
+            "spatial_filter.smooth_alpha": '0.5',
+            "spatial_filter.smooth_delta": '20',
         }.items()
     )
 
