@@ -33,5 +33,17 @@ def generate_launch_description():
             ]
         ),
 
+        Node(
+            package='measure_reflect_distance',              # sync_camera_info.py を入れたパッケージ
+            executable='sync_camera_info',        # setup.py の entry_point に合わせる
+            name='camera_info_sync',
+            parameters=[{
+                'image_topic': '/camera/image_rgb',
+                'camera_info_topic': '/camera/camera_info',
+                'camera_info_url': 'file:///path/to/calibration.yaml',
+                # 'force_frame_id': 'camera_color_optical_frame',  # 必要なら固定
+            }],
+        ),
+
         # 3つ目以降も同様に追加可能...
     ])

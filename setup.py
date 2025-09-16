@@ -25,6 +25,7 @@ setup(
         'console_scripts': [
             'my_node = measure_reflect_distance.my_node:main',
             'unet_inference_node = measure_reflect_distance.unet_inference_node:main',
+            'sync_camera_info = measure_reflect_distance.sync_camera_info:main',
         ],
     },
 )
