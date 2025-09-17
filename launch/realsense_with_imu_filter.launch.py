@@ -24,7 +24,7 @@ def generate_launch_description():
             'enable_sync': 'true',
             "rgb_camera.color_profile": '640x480x30',
             "depth_module.depth_profile": '848x480x30',
-            "colorizer.enable": 'true',
+            # "colorizer.enable": 'true',
 
             "hole_filling_filter.enable": 'true',
             "hole_filling_filter.holes_fill": '1',
