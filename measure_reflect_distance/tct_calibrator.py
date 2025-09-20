@@ -2,21 +2,22 @@
 # -*- coding: utf-8 -*-
 
 """
-T_ct（実タグ→RealSenseカラー光学）の外部を、1ショット（または複数ショット平均）で求めるノード。
+T_ct（本体タグ→RealSenseカラー光学）の外部パラメータを、1ショット（または複数ショット平均）で求めるノード。
 
 前提：
-- RealSense 側 apriltag_ros が、 camera_color_optical_frame <- reflect  を出す（参照タグ）
-- OAK-D   側 apriltag_ros が、 oak_rgb_camera_optical_frame <- reflect と
-                               oak_rgb_camera_optical_frame <- base     を出す
-- 参照タグ reflect は壁/床などに固定（非反転タグ）
-- 本体に貼るタグ base は RealSense に剛体固定（キャリブ時は非反転タグ）
+- RealSense 側 apriltag_ros： camera_color_optical_frame <- base        （参照タグ, ID=7）
+- OAK-D   側 apriltag_ros：   oak_rgb_camera_optical_frame <- oak_base   （参照タグ, ID=7）
+                               oak_rgb_camera_optical_frame <- oak_reflected（本体タグ, ID=0）
+- 参照タグ（base/oak_base）は壁や床などに固定
+- 本体タグ（oak_reflected）は RealSense に剛体接続
 
 式：
-  T_{c←t} = T_{c←tr} * (T_{e←tr})^{-1} * T_{e←tc}
-    c : RealSense color optical
-    e : OAK-D color optical
-    tr: reflect（参照タグ）
-    tc: base（本体タグ）
+  T_{c←t} = T_{c←tr_rs} * (T_{e←tr_oak})^{-1} * T_{e←tc}
+    c : RealSense color optical  (= camera_color_optical_frame)
+    e : OAK-D color optical      (= oak_rgb_camera_optical_frame)
+    tr_rs  : RealSenseが観測する参照タグ（base）
+    tr_oak : OAKが観測する参照タグ（oak_base）
+    tc     : OAKが観測する本体タグ（oak_reflected）
 """
 
 import math
@@ -195,26 +196,51 @@ class TctCalibrator(Node):
 
     def finish(self):
         """複数サンプルからロバストに平均を取り、t_ct_xyz / t_ct_rpy を印字"""
+        if len(self.T_list) == 0:
+            self.get_logger().error('No samples collected.')
+            rclpy.shutdown()
+            return
+
         Ts = np.stack(self.T_list, axis=0)
 
         # 並進は中央値、回転はクォータニオン平均
-        ts = Ts[:,:3,3]
+        ts = Ts[:, :3, 3]
         t_med = np.median(ts, axis=0)
 
         qs = []
         for T in Ts:
-            q = quat_from_R(T[:3,:3])
-            if q[3] < 0:  # w>=0 に揃える
+            q = quat_from_R(T[:3, :3])
+            if q[3] < 0:   # w>=0 に揃える
                 q = -q
             qs.append(q)
-            q_avg = quat_avg(np.stack(qs))
-            R_avg = rot_from_quat(q_avg[0], q_avg[1], q_avg[2], q_avg[3])  # ← 余計な代入を削除
-            roll, pitch, yaw = rpy_from_R(R_avg)
 
-        print('\n==== Estimated T_c<-t (tag_cam "base" -> RS color optical) ====')
-        print(f't_ct_xyz: [{t_med[0]:.6f}, {t_med[1]:.6f}, {t_med[2]:.6f}]  # [m]')
-        print(f't_ct_rpy: [{roll:.6f}, {pitch:.6f}, {yaw:.6f}]  # [rad] (roll,pitch,yaw, ZYX)')
-        print('Paste these values into mirror_plane_estimator params (t_ct_xyz / t_ct_rpy).')
+        q_avg = quat_avg(np.stack(qs))  # ← ループの外でまとめて平均
+        R_avg = rot_from_quat(q_avg[0], q_avg[1], q_avg[2], q_avg[3])
+        roll, pitch, yaw = rpy_from_R(R_avg)
+
+        print('\n==== Estimated extrinsics  T_{c←t}  (cam tag -> RS color optical) ====')
+        print(f'frames:')
+        print(f'  RS cam frame (c):        {self.c}')
+        print(f'  OAK cam frame (e):       {self.e}')
+        print(f'  RS ref tag (tr_rs):      {self.tr_rs}')
+        print(f'  OAK ref tag (tr_oak):    {self.tr_oak}')
+        print(f'  OAK cam tag (t = tc):    {self.tc}')
+        print(f'samples used: {Ts.shape[0]} / requested: {self.N}')
+
+        # 並進の分散目安も併記
+        t_std = np.std(ts, axis=0)
+        print(f'\nT_c←t translation [m]')
+        print(f'  t_ct_xyz: [{t_med[0]:.6f}, {t_med[1]:.6f}, {t_med[2]:.6f}]')
+        print(f'  std_xyz : [{t_std[0]:.4f}, {t_std[1]:.4f}, {t_std[2]:.4f}]')
+
+        # 角度はrad/deg両方
+        roll_deg, pitch_deg, yaw_deg = [v*180.0/math.pi for v in (roll, pitch, yaw)]
+        print(f'\nT_c←t rotation (ZYX rpy)')
+        print(f'  t_ct_rpy [rad]: [{roll:.6f}, {pitch:.6f}, {yaw:.6f}]')
+        print(f'  t_ct_rpy [deg]: [{roll_deg:.3f}, {pitch_deg:.3f}, {yaw_deg:.3f}]')
+
+        print('\nPaste t_ct_xyz / t_ct_rpy [rad] into mirror_plane_estimator params.')
+
         rclpy.shutdown()
 
 
