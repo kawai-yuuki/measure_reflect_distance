@@ -32,6 +32,7 @@ from rclpy.duration import Duration
 from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import TransformStamped
 import tf2_ros
+from builtin_interfaces.msg import Time
 
 
 # =========================
@@ -76,6 +77,39 @@ def rot_from_quat(x, y, z, w):
         [  xy+wz,     1.0-(xx+zz),   yz-wx],
         [  xz-wy,       yz+wx,     1.0-(xx+yy)]
     ])
+
+def quat_from_R(R):
+    """回転行列(3x3) → クォータニオン(x,y,z,w)。安定な分岐版。"""
+    t = np.trace(R)
+    if t > 0.0:
+        s = math.sqrt(t + 1.0) * 2.0
+        w = 0.25 * s
+        x = (R[2,1] - R[1,2]) / s
+        y = (R[0,2] - R[2,0]) / s
+        z = (R[1,0] - R[0,1]) / s
+    else:
+        i = int(np.argmax([R[0,0], R[1,1], R[2,2]]))
+        if i == 0:
+            s = math.sqrt(1.0 + R[0,0] - R[1,1] - R[2,2]) * 2.0
+            x = 0.25 * s
+            y = (R[0,1] + R[1,0]) / s
+            z = (R[0,2] + R[2,0]) / s
+            w = (R[2,1] - R[1,2]) / s
+        elif i == 1:
+            s = math.sqrt(1.0 - R[0,0] + R[1,1] - R[2,2]) * 2.0
+            x = (R[0,1] + R[1,0]) / s
+            y = 0.25 * s
+            z = (R[1,2] + R[2,1]) / s
+            w = (R[0,2] - R[2,0]) / s
+        else:
+            s = math.sqrt(1.0 - R[0,0] - R[1,1] + R[2,2]) * 2.0
+            x = (R[0,2] + R[2,0]) / s
+            y = (R[1,2] + R[2,1]) / s
+            z = 0.25 * s
+            w = (R[1,0] - R[0,1]) / s
+    q = np.array([x, y, z, w], dtype=float)
+    q /= (np.linalg.norm(q) + 1e-12)
+    return q
 
 def quat_from_two_vectors(a, b):
     """
@@ -136,7 +170,7 @@ def plane_from_reflection(S):
     n = U[:, 0]
     n = n / (np.linalg.norm(n) + 1e-12)
     d = 0.5 * float(n @ t)
-    if d > 0:
+    if (-d * n[2]) < 0.0:  # カメラ前方に法線が向くように
         n = -n
         d = -d
     return n, d
@@ -168,20 +202,22 @@ class MirrorPlaneEstimator(Node):
 
         # ---- パラメータ定義 ----
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')  # D455カラー光学フレーム
-        self.declare_parameter('output_frame', 'camera_link')  # 出力先フレーム（例: base_link / map）
-        self.declare_parameter('tag_id', 0)  # ミラー用タグID
+        self.declare_parameter('output_frame', 'map')  # 出力先フレーム（例: base_link / map）
+        self.declare_parameter('tag_frame_name', 'reflected')                     # 鏡像タグのフレーム名（apriltag_ros の出力）
         # 実タグ（カメラ近傍に剛体固定）→ カメラ の外部 T_c<-t
-        self.declare_parameter('t_ct_xyz', [0.0, 0.0, 0.0])  # [m]
-        self.declare_parameter('t_ct_rpy', [0.0, 0.0, 0.0])  # [rad] roll, pitch, yaw
+        self.declare_parameter('t_ct_xyz', [0.017545,-0.080829,-0.021476])  # [m]
+        self.declare_parameter('t_ct_rpy', [-0.023080,0.001224,-3.131105])  # [rad] roll, pitch, yaw
         self.declare_parameter('publish_tf', True)  # 可視化TFを出すか
+        self.declare_parameter('tag_real_frame', 'tag_real')  # 実タグのフレーム名
 
         # ---- パラメータ取得 ----
         self.cam_frame = self.get_parameter('camera_frame').value
         self.out_frame = self.get_parameter('output_frame').value
-        self.tag_id = int(self.get_parameter('tag_id').value)
+        self.tag_frame = str(self.get_parameter('tag_frame_name').value)
         t_ct_xyz = np.array(self.get_parameter('t_ct_xyz').value, dtype=float)
         t_ct_rpy = np.array(self.get_parameter('t_ct_rpy').value, dtype=float)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
+        self.tag_real_frame = str(self.get_parameter('tag_real_frame').value)
 
         # 実タグ→カメラ: T_c<-t を4x4に構成
         R_ct = rot_from_rpy(t_ct_rpy[0], t_ct_rpy[1], t_ct_rpy[2])
@@ -199,11 +235,35 @@ class MirrorPlaneEstimator(Node):
         # ---- タイマ（30Hz） ----
         self.timer = self.create_timer(1.0/30.0, self.tick)
 
-        self.tag_frame = f'tag_{self.tag_id}'
         self.get_logger().info(
             f'[mirror_plane_estimator] camera_frame={self.cam_frame}, '
             f'output_frame={self.out_frame}, tag_frame={self.tag_frame}'
         )
+
+        self._last_log_ns = 0
+        self.static_broadcaster = tf2_ros.StaticTransformBroadcaster(self)
+
+        # --- tag_real を static として一度だけ配信 ---
+        R_c_t = self.T_c_t[:3, :3]
+        t_c_t = self.T_c_t[:3, 3]
+        q_c_t = quat_from_R(R_c_t)
+
+        tmsg_tag = TransformStamped()
+        tmsg_tag.header.stamp = Time(sec=0, nanosec=0)
+        tmsg_tag.header.frame_id = self.cam_frame
+        tmsg_tag.child_frame_id = self.tag_real_frame
+        tmsg_tag.transform.translation.x = float(t_c_t[0])
+        tmsg_tag.transform.translation.y = float(t_c_t[1])
+        tmsg_tag.transform.translation.z = float(t_c_t[2])
+        tmsg_tag.transform.rotation.x = float(q_c_t[0])
+        tmsg_tag.transform.rotation.y = float(q_c_t[1])
+        tmsg_tag.transform.rotation.z = float(q_c_t[2])
+        tmsg_tag.transform.rotation.w = float(q_c_t[3])
+
+        self.static_broadcaster.sendTransform(tmsg_tag)
+        self.get_logger().info(f'[tag_real static TF] published once: parent={self.cam_frame} '
+                            f'child={self.tag_real_frame}, t={t_c_t}, q={q_c_t}')
+
 
     def tick(self):
         """毎フレーム、鏡像タグのTFから S を作り、平面 (n,d) を推定して配信。"""
@@ -213,7 +273,8 @@ class MirrorPlaneEstimator(Node):
         #    apriltag_ros が camera_frame を親、tag_<ID> を子に出している前提で lookup。
         try:
             ts = self.tf_buffer.lookup_transform(self.cam_frame, self.tag_frame, now)
-        except Exception:
+        except Exception as ex:
+            self.get_logger().warn(f'No TF: {self.cam_frame} <- {self.tag_frame} ({ex})')
             return  # そのフレームでタグが見えない
         trans = [ts.transform.translation.x,
                  ts.transform.translation.y,
@@ -230,6 +291,21 @@ class MirrorPlaneEstimator(Node):
 
         # 3) S から平面 (n, d) を復元（カメラ座標系）
         n_cam, d_cam = plane_from_reflection(S)
+
+        p_real = self.T_c_t[:3, 3]                      # camera<-tag_real の並進
+        p_virt = np.array(trans, dtype=float)           # camera<-tag_virtual の並進
+
+        dir_vec = p_real - p_virt
+        norm_dir = np.linalg.norm(dir_vec)
+        if norm_dir > 1e-9:
+            # 1) 向き補正：n_cam を (p_real - p_virt) と同方向に
+            if float(n_cam @ dir_vec) < 0.0:
+                n_cam = -n_cam
+                d_cam = -d_cam
+            # 2) 二等分面を必ず通るよう d を上書き
+            m = 0.5 * (p_real + p_virt)
+            d_cam = - float(n_cam @ m)
+
         N_cam = np.array([n_cam[0], n_cam[1], n_cam[2], d_cam], dtype=float)
 
         # 4) カメラ座標で publish
@@ -257,10 +333,16 @@ class MirrorPlaneEstimator(Node):
         # 6) 可視化 TF: 平面の最近点 p0 と法線向き
         if self.publish_tf and self.tf_broadcaster is not None:
             # カメラ座標側
+            stamp = self.get_clock().now().to_msg()
+
             p0_cam = -d_cam * n_cam                 # 平面上でカメラ原点に最も近い点
+            now_ns = self.get_clock().now().nanoseconds
+            if now_ns - self._last_log_ns > 1_000_000_000:  # 1秒
+                self.get_logger().info(f'plane_cam: n={n_cam}, d={d_cam:.3f}, p0_cam={p0_cam}')
+                self._last_log_ns = now_ns
             q_cam = quat_from_two_vectors(np.array([0.0, 0.0, 1.0]), n_cam)  # Z軸→法線
             tmsg = TransformStamped()
-            tmsg.header.stamp = self.get_clock().now().to_msg()
+            tmsg.header.stamp = stamp
             tmsg.header.frame_id = self.cam_frame
             tmsg.child_frame_id = 'mirror_plane_cam'
             tmsg.transform.translation.x = float(p0_cam[0])
@@ -278,7 +360,7 @@ class MirrorPlaneEstimator(Node):
             p0_out = -d_out * n_out
             q_out = quat_from_two_vectors(np.array([0.0, 0.0, 1.0]), n_out)
             tmsg2 = TransformStamped()
-            tmsg2.header.stamp = self.get_clock().now().to_msg()
+            tmsg2.header.stamp = stamp
             tmsg2.header.frame_id = self.out_frame
             tmsg2.child_frame_id = 'mirror_plane'
             tmsg2.transform.translation.x = float(p0_out[0])
