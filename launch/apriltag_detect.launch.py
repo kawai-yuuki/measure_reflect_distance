@@ -43,6 +43,11 @@ def generate_launch_description():
             default_value=TextSubstitution(text='apriltag'),
             description='起動するノード名（YAML側の先頭キーと合わせると◎）'
         ),
+        DeclareLaunchArgument(
+            'use_sim_time',
+            default_value='true',
+            description='Use simulated time'
+        ),
 
         # ===== ノード =====
         Node(
@@ -50,7 +55,10 @@ def generate_launch_description():
             executable='apriltag_node',
             name=LaunchConfiguration('node_name'),
             output='screen',
-            parameters=[LaunchConfiguration('params_file')],
+            parameters=[
+                LaunchConfiguration('params_file'), 
+                {'use_sim_time': LaunchConfiguration('use_sim_time')}
+            ],
             remappings=[
                 ('image_rect', LaunchConfiguration('image_topic')),
                 ('camera_info', LaunchConfiguration('camera_info_topic')),

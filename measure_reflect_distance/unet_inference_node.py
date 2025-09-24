@@ -9,7 +9,7 @@ import cv2
 import numpy as np
 import os
 
-from .unet_model import UNet
+from measure_reflect_distance.util.unet_model import UNet
  
  
 class UNetInferenceNode(Node):
