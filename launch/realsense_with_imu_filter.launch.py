@@ -70,7 +70,7 @@ def generate_launch_description():
             "spatial_filter.smooth_delta": '20',
 
             # その他
-            'initial_reset': 'true',
+            # 'initial_reset': 'true',
             'depth_module.frame_queue_size': '32',
             'rgb_camera.frame_queue_size': '32',
         }.items()
