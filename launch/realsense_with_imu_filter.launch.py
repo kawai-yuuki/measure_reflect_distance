@@ -51,23 +51,23 @@ def generate_launch_description():
             'rgb_camera.auto_exposure_priority': 'false',
 
             # フィルタ
-            "hole_filling_filter.enable": 'true',
-            "hole_filling_filter.holes_fill": '1',
+            # "hole_filling_filter.enable": 'true',
+            # "hole_filling_filter.holes_fill": '1',
 
-            "decimation_filter.enable": 'true',
-            "decimation_filter.decimation_magnitude": '2',
+            # "decimation_filter.enable": 'true',
+            # "decimation_filter.decimation_magnitude": '2',
 
-            "temporal_filter.enable": 'true',
-            "temporal_filter.holes_fill": '0',
-            "temporal_filter.smooth_alpha": '0.2',
-            "temporal_filter.smooth_delta": '80',
-            "temporal_filter.persistency_index": '3',
+            # "temporal_filter.enable": 'true',
+            # "temporal_filter.holes_fill": '0',
+            # "temporal_filter.smooth_alpha": '0.2',
+            # "temporal_filter.smooth_delta": '80',
+            # "temporal_filter.persistency_index": '3',
 
-            "spatial_filter.enable": 'true',
-            "spatial_filter.holes_fill": '0',
-            "spatial_filter.magnitude": '2',
-            "spatial_filter.smooth_alpha": '0.5',
-            "spatial_filter.smooth_delta": '20',
+            # "spatial_filter.enable": 'true',
+            # "spatial_filter.holes_fill": '0',
+            # "spatial_filter.magnitude": '2',
+            # "spatial_filter.smooth_alpha": '0.5',
+            # "spatial_filter.smooth_delta": '20',
 
             # その他
             # 'initial_reset': 'true',
