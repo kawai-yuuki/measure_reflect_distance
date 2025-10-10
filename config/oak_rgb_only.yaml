@@ -1,0 +1,23 @@
+/oak:
+  ros__parameters:
+    camera:
+      i_pipeline_type: rgb
+      i_enable_imu: false
+      i_enable_ir: false
+      i_nn_type: none
+    rgb:
+      i_fps: 30.0
+      i_board_socket: "RGB"
+      publish:
+        camera_info: true
+        image_raw: true
+        image_rect: false
+        image_rect_compressed: false
+    stereo:
+      i_publish_synced_rect_pair: false
+    depth:
+      i_enable: false
+    imu:
+      i_enable: false          # ← IMU パイプラインを完全に無効化
+      publish:
+        imu: false

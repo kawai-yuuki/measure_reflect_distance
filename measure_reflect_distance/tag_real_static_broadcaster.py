@@ -18,8 +18,10 @@ class TagRealStaticBroadcaster(Node):
         # ---- パラメータ ----
         self.declare_parameter('parent_frame', 'camera_color_optical_frame')
         self.declare_parameter('child_frame',  'tag_real')
-        self.declare_parameter('t_ct_xyz', [0.017545, -0.080829, -0.021476])   # [m]
-        self.declare_parameter('t_ct_rpy', [-0.023080, 0.001224, -3.131105])   # [rad] roll, pitch, yaw
+        # self.declare_parameter('t_ct_xyz', [0.017545, -0.080829, -0.021476])   # [m]
+        # self.declare_parameter('t_ct_rpy', [-0.023080, 0.001224, -3.131105])   # [rad] roll, pitch, yaw
+        self.declare_parameter('t_ct_xyz', [0.018305, -0.083156, -0.018434])   # [m]
+        self.declare_parameter('t_ct_rpy', [-0.010357, -0.000770, -3.127285])   # [rad] roll, pitch, yaw
 
         parent = self.get_parameter('parent_frame').value
         child  = self.get_parameter('child_frame').value
