@@ -20,7 +20,7 @@ class UNetInferenceNode(Node):
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
         # モデルへの絶対パスを生成
-        model_path = '/media/yuukikawai-ubuntu22/KIOXIA/segmentation_model/mirror/model_original_img/best.pt'
+        model_path = '/media/yuukikawai-ubuntu22/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt'
 
         state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state_dict)

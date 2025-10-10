@@ -129,6 +129,9 @@ def generate_launch_description():
             'subscribe_rgb': True,
             'subscribe_depth': True,
             'approx_sync': True,
+            'topic_queue_size': queue_size,
+            'sync_queue_size': sync_queue_size,
+            'approx_sync_max_interval': sync_max_interval,
             # 可視化を軽くするなら（任意）
             'voxel_size': 0.03,            # 3cm 体素
             'decimation': 2,               # 画像間引き

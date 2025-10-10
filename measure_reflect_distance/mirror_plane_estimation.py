@@ -30,6 +30,7 @@ from rclpy.duration import Duration
 
 from std_msgs.msg import Float64MultiArray
 from geometry_msgs.msg import TransformStamped
+from visualization_msgs.msg import Marker
 import tf2_ros
 
 from measure_reflect_distance.util.mirror_geometry import (
@@ -42,6 +43,7 @@ class MirrorPlaneEstimator(Node):
         super().__init__('mirror_plane_estimator')
 
         # ---- パラメータ定義 ----
+        # カメラ座標・出力座標・鏡像タグのフレーム名を外部から受け取る
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')  # D455カラー光学フレーム
         self.declare_parameter('output_frame', 'map')  # 出力先フレーム（例: base_link / map）
         self.declare_parameter('tag_frame_name', 'reflected')                     # 鏡像タグのフレーム名（apriltag_ros の出力）
@@ -49,6 +51,9 @@ class MirrorPlaneEstimator(Node):
         self.declare_parameter('t_ct_xyz', [0.017545,-0.080829,-0.021476])  # [m]
         self.declare_parameter('t_ct_rpy', [-0.023080,0.001224,-3.131105])  # [rad] roll, pitch, yaw
         self.declare_parameter('publish_tf', True)  # 可視化TFを出すか
+        self.declare_parameter('publish_marker', False)  # RViz 用 Marker を出すか
+        self.declare_parameter('marker_scale', [0.3, 0.3, 0.01])  # マーカーの幅・高さ・厚み[m]
+        self.declare_parameter('tag_tf_timeout_sec', 0.5)  # 鏡像タグの TF がこの秒数古ければ無効とみなす
 
         # ---- パラメータ取得 ----
         self.cam_frame = self.get_parameter('camera_frame').value
@@ -57,18 +62,27 @@ class MirrorPlaneEstimator(Node):
         t_ct_xyz = np.array(self.get_parameter('t_ct_xyz').value, dtype=float)
         t_ct_rpy = np.array(self.get_parameter('t_ct_rpy').value, dtype=float)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
+        self.publish_marker = bool(self.get_parameter('publish_marker').value)
+        self.marker_scale = np.array(self.get_parameter('marker_scale').value, dtype=float)
+        self.tag_tf_timeout = float(self.get_parameter('tag_tf_timeout_sec').value)
         # 実タグ→カメラ: T_c<-t を4x4に構成
         R_ct = rot_from_rpy(t_ct_rpy[0], t_ct_rpy[1], t_ct_rpy[2])
         self.T_c_t = mat4_from_rt(R_ct, t_ct_xyz)
 
         # ---- TF 準備 ----
+        # 鏡像タグ（仮想タグ）の姿勢を取り出し、必要に応じて TF を再配信する
         self.tf_buffer = tf2_ros.Buffer(cache_time=Duration(seconds=5.0))
         self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
         self.tf_broadcaster = tf2_ros.TransformBroadcaster(self) if self.publish_tf else None
+        self._plane_visible = False
+        self._warned_missing_out_tf = False  # output_frame との TF が未接続な場合の一度きり警告制御
+        self._warned_stale_tag_tf = False
 
         # ---- Publisher ----
+        # 数値は Float64MultiArray として出し、可視化は別ノード（mapper）に任せる
         self.pub_plane_cam = self.create_publisher(Float64MultiArray, 'mirror_plane_cam', 10)
         self.pub_plane_out = self.create_publisher(Float64MultiArray, 'mirror_plane', 10)  # output_frame側で出す
+        self.marker_pub = self.create_publisher(Marker, 'mirror_plane_marker', 1) if self.publish_marker else None
 
         # ---- タイマ（30Hz） ----
         self.timer = self.create_timer(1.0/30.0, self.tick)
@@ -83,15 +97,46 @@ class MirrorPlaneEstimator(Node):
 
     def tick(self):
         """毎フレーム、鏡像タグのTFから S を作り、平面 (n,d) を推定して配信。"""
-        now = rclpy.time.Time()
+        query_time = rclpy.time.Time()
+        now_ros = self.get_clock().now()
+        stamp_now = now_ros.to_msg()
 
         # 1) 鏡像タグ（仮想タグ）: T_c<-tv を取得
         #    apriltag_ros が camera_frame を親、tag_<ID> を子に出している前提で lookup。
         try:
-            ts = self.tf_buffer.lookup_transform(self.cam_frame, self.tag_frame, now)
+            ts = self.tf_buffer.lookup_transform(self.cam_frame, self.tag_frame, query_time)
         except Exception as ex:
-            self.get_logger().warn(f'No TF: {self.cam_frame} <- {self.tag_frame} ({ex})')
+            if self._plane_visible:
+                self.get_logger().warn(
+                    f'No TF: {self.cam_frame} <- {self.tag_frame} ({ex}); stop publishing mirror plane'
+                )
+                if self.publish_marker and self.marker_pub is not None:
+                    self._publish_marker_delete()
+                self._plane_visible = False
             return  # そのフレームでタグが見えない
+
+        # --- 古い鏡像 TF は無効 ---
+        tag_stamp = ts.header.stamp
+        tag_age = (now_ros.nanoseconds - (tag_stamp.sec * 1_000_000_000 + tag_stamp.nanosec)) / 1e9
+        if tag_age < 0.0:
+            tag_age = 0.0
+        if self.tag_tf_timeout > 0.0 and tag_age > self.tag_tf_timeout:
+            if not self._warned_stale_tag_tf:
+                self.get_logger().warn(
+                    f'Stale mirror tag TF (age={tag_age:.2f}s > {self.tag_tf_timeout:.2f}s); treating as not visible'
+                )
+                self._warned_stale_tag_tf = True
+            if self._plane_visible:
+                if self.publish_marker and self.marker_pub is not None:
+                    self._publish_marker_delete()
+                self._plane_visible = False
+            return
+        self._warned_stale_tag_tf = False
+
+        if not self._plane_visible:
+            self.get_logger().info('Mirror plane tag detected; resume publishing')
+        self._plane_visible = True
+
         trans = [ts.transform.translation.x,
                  ts.transform.translation.y,
                  ts.transform.translation.z]
@@ -130,35 +175,52 @@ class MirrorPlaneEstimator(Node):
         self.pub_plane_cam.publish(msg_cam)
 
         # 5) 必要なら output_frame（例: base_link / map）に変換して publish
+        plane_out_available = False
         try:
             # T_out<-cam を TF から取得
-            ts_out = self.tf_buffer.lookup_transform(self.out_frame, self.cam_frame, now)
+            ts_out = self.tf_buffer.lookup_transform(self.out_frame, self.cam_frame, query_time)
             T_out_cam = mat4_from_tf(
                 [ts_out.transform.translation.x, ts_out.transform.translation.y, ts_out.transform.translation.z],
                 [ts_out.transform.rotation.x, ts_out.transform.rotation.y, ts_out.transform.rotation.z, ts_out.transform.rotation.w]
             )
             N_out = transform_plane(N_cam, T_out_cam)
-        except Exception:
-            # 変換がまだ出ていない等のときは、そのままカメラ系で出す
-            N_out = N_cam
+            plane_out_available = True
+            self._warned_missing_out_tf = False
+        except Exception as ex:
+            if not self._warned_missing_out_tf:
+                self.get_logger().warn(
+                    f'No TF: {self.out_frame} <- {self.cam_frame} ({ex}); skip mirror plane output in {self.out_frame}'
+                )
+                self._warned_missing_out_tf = True
+            plane_out_available = False
 
-        msg_out = Float64MultiArray()
-        msg_out.data = [float(N_out[0]), float(N_out[1]), float(N_out[2]), float(N_out[3])]
-        self.pub_plane_out.publish(msg_out)
+        if plane_out_available:
+            # map 側へ平面を流す（以降の可視化／平均化ノードの入力）
+            msg_out = Float64MultiArray()
+            msg_out.data = [float(N_out[0]), float(N_out[1]), float(N_out[2]), float(N_out[3])]
+            self.pub_plane_out.publish(msg_out)
+
+            n_out = N_out[:3]
+            d_out = N_out[3]
+            p0_out = -d_out * n_out
+            q_out = quat_from_two_vectors(np.array([0.0, 0.0, 1.0]), n_out)
+        else:
+            n_out = None
+            d_out = None
+            p0_out = None
+            q_out = None
 
         # 6) 可視化 TF: 平面の最近点 p0 と法線向き
         if self.publish_tf and self.tf_broadcaster is not None:
             # カメラ座標側
-            stamp = ts.header.stamp
-
             p0_cam = -d_cam * n_cam                 # 平面上でカメラ原点に最も近い点
-            now_ns = self.get_clock().now().nanoseconds
+            now_ns = now_ros.nanoseconds
             if now_ns - self._last_log_ns > 1_000_000_000:  # 1秒
                 self.get_logger().info(f'plane_cam: n={n_cam}, d={d_cam:.3f}, p0_cam={p0_cam}')
                 self._last_log_ns = now_ns
             q_cam = quat_from_two_vectors(np.array([0.0, 0.0, 1.0]), n_cam)  # Z軸→法線
             tmsg = TransformStamped()
-            tmsg.header.stamp = stamp
+            tmsg.header.stamp = stamp_now
             tmsg.header.frame_id = self.cam_frame
             tmsg.child_frame_id = 'mirror_plane_cam'
             tmsg.transform.translation.x = float(p0_cam[0])
@@ -171,22 +233,73 @@ class MirrorPlaneEstimator(Node):
             self.tf_broadcaster.sendTransform(tmsg)
 
             # 出力フレーム側（出力座標での最近点・法線）
-            n_out = N_out[:3]
-            d_out = N_out[3]
-            p0_out = -d_out * n_out
-            q_out = quat_from_two_vectors(np.array([0.0, 0.0, 1.0]), n_out)
-            tmsg2 = TransformStamped()
-            tmsg2.header.stamp = stamp
-            tmsg2.header.frame_id = self.out_frame
-            tmsg2.child_frame_id = 'mirror_plane'
-            tmsg2.transform.translation.x = float(p0_out[0])
-            tmsg2.transform.translation.y = float(p0_out[1])
-            tmsg2.transform.translation.z = float(p0_out[2])
-            tmsg2.transform.rotation.x = float(q_out[0])
-            tmsg2.transform.rotation.y = float(q_out[1])
-            tmsg2.transform.rotation.z = float(q_out[2])
-            tmsg2.transform.rotation.w = float(q_out[3])
-            self.tf_broadcaster.sendTransform(tmsg2)
+            if plane_out_available and p0_out is not None and q_out is not None:
+                tmsg2 = TransformStamped()
+                tmsg2.header.stamp = stamp_now
+                tmsg2.header.frame_id = self.out_frame
+                tmsg2.child_frame_id = 'mirror_plane'
+                tmsg2.transform.translation.x = float(p0_out[0])
+                tmsg2.transform.translation.y = float(p0_out[1])
+                tmsg2.transform.translation.z = float(p0_out[2])
+                tmsg2.transform.rotation.x = float(q_out[0])
+                tmsg2.transform.rotation.y = float(q_out[1])
+                tmsg2.transform.rotation.z = float(q_out[2])
+                tmsg2.transform.rotation.w = float(q_out[3])
+                self.tf_broadcaster.sendTransform(tmsg2)
+            else:
+                tmsg2 = TransformStamped()
+                tmsg2.header.stamp = stamp_now
+                tmsg2.header.frame_id = self.out_frame
+                tmsg2.child_frame_id = 'mirror_plane'
+                tmsg2.transform.translation.x = 0.0
+                tmsg2.transform.translation.y = 0.0
+                tmsg2.transform.translation.z = 0.0
+                tmsg2.transform.rotation.x = 0.0
+                tmsg2.transform.rotation.y = 0.0
+                tmsg2.transform.rotation.z = 0.0
+                tmsg2.transform.rotation.w = 1.0
+                self.tf_broadcaster.sendTransform(tmsg2)
+
+        if self.publish_marker and self.marker_pub is not None:
+            self._publish_plane_marker(stamp_now, p0_out, q_out)
+
+    def _publish_plane_marker(self, stamp, position, orientation):
+        if position is None or orientation is None:
+            self._publish_marker_delete()
+            return
+        # mapper ノード導入後は通常無効だが、デバッグ用に残している
+        marker = Marker()
+        marker.header.frame_id = self.out_frame
+        marker.header.stamp = stamp
+        marker.ns = 'mirror_plane'
+        marker.id = 0
+        marker.type = Marker.CUBE
+        marker.action = Marker.ADD
+        marker.pose.position.x = float(position[0])
+        marker.pose.position.y = float(position[1])
+        marker.pose.position.z = float(position[2])
+        marker.pose.orientation.x = float(orientation[0])
+        marker.pose.orientation.y = float(orientation[1])
+        marker.pose.orientation.z = float(orientation[2])
+        marker.pose.orientation.w = float(orientation[3])
+        marker.scale.x = float(self.marker_scale[0])
+        marker.scale.y = float(self.marker_scale[1])
+        marker.scale.z = float(max(self.marker_scale[2], 1e-3))
+        marker.color.r = 0.2
+        marker.color.g = 0.8
+        marker.color.b = 1.0
+        marker.color.a = 0.6
+        self.marker_pub.publish(marker)
+
+    def _publish_marker_delete(self):
+        # RViz から既存のマーカーを確実に取り除くための DELETE メッセージ
+        marker = Marker()
+        marker.header.frame_id = self.out_frame
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = 'mirror_plane'
+        marker.id = 0
+        marker.action = Marker.DELETE
+        self.marker_pub.publish(marker)
 
 
 def main():
