@@ -51,8 +51,8 @@ def generate_launch_description():
         DeclareLaunchArgument("camera_frame",   default_value="camera_color_optical_frame"),
         DeclareLaunchArgument("output_frame",   default_value="map"),
         DeclareLaunchArgument("tag_frame_name", default_value="reflected"),
-        DeclareLaunchArgument("t_ct_xyz",       default_value="[0.017545, -0.080829, -0.021476]"),
-        DeclareLaunchArgument("t_ct_rpy",       default_value="[-0.023080, 0.001224, -3.131105]"),
+        DeclareLaunchArgument("t_ct_xyz",       default_value="[0.018305, -0.083156, -0.018434]"),
+        DeclareLaunchArgument("t_ct_rpy",       default_value="[-0.010357, -0.000770, -3.127285]"),
         DeclareLaunchArgument("publish_tf",     default_value="true"),
         # rosbag / シミュ時間を使う場合 true
         DeclareLaunchArgument("use_sim_time",   default_value="true"),
