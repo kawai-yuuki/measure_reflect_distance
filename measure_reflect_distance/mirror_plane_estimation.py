@@ -7,9 +7,9 @@
   * TF: camera_color_optical_frame <- tag_<ID>（鏡で反射して見える "仮想タグ" の姿勢）
   * パラメータ: 実タグ(カメラ近傍に剛体固定) -> カメラ の外部 T_c<-t
 - 出力:
-  * /mirror_plane_cam : カメラ座標での [n_x, n_y, n_z, d, p_x, p_y, p_z] （p は反射点）
-  * /mirror_plane     : output_frame（例: base_link / map）に変換した [n_x, n_y, n_z, d, p_x, p_y, p_z]
-  * TF: "mirror_plane_cam" / "mirror_plane"（可視化用。原点=平面の最近点、姿勢=法線＋接線基準）
+  * /mirror_plane_cam : カメラ座標での [n_x, n_y, n_z, d]
+  * /mirror_plane     : output_frame（例: base_link / map）に変換した [n_x, n_y, n_z, d]
+  * TF: "mirror_plane_cam" / "mirror_plane"（可視化用。原点=平面の最近点、姿勢=法線向き）
   
 理論の要点:
 鏡像は「平面反射変換 S」で表現でき、S は 4x4 の同次変換で
@@ -169,39 +169,40 @@ class MirrorPlaneEstimator(Node):
 
         N_cam = np.array([n_cam[0], n_cam[1], n_cam[2], d_cam], dtype=float)
 
-        # 鏡像タグ方向の線分と平面の交点（鏡面上で反射が起きる点）を計算
-        p_plane_cam = -d_cam * n_cam  # フォールバック（法線方向の最近点）
+        # 鏡像タグ方向の線分と平面との交点（反射点）を算出
+        p_plane_cam = -d_cam * n_cam  # フォールバック: 最近点
         denom = float(n_cam @ np.array(trans, dtype=float))
         if abs(denom) > 1e-9:
             scale = -d_cam / denom
             if scale > 0.0:
                 p_plane_cam = scale * np.array(trans, dtype=float)
 
-        # 平面上の接線ベクトル（カメラ→鏡像タグ方向を平面へ射影）を生成
-        ray_cam = np.array(trans, dtype=float)
-        ray_norm = np.linalg.norm(ray_cam)
-        if ray_norm > 1e-9:
-            ray_dir_cam = ray_cam / ray_norm
-        else:
-            ray_dir_cam = np.array([0.0, 0.0, 1.0])
-        tangent_cam = ray_dir_cam - float(ray_dir_cam @ n_cam) * n_cam
-        if np.linalg.norm(tangent_cam) < 1e-9:
-            # 法線にほぼ平行な場合は任意の基準ベクトルを使う
-            fallback = np.array([1.0, 0.0, 0.0])
-            if abs(float(fallback @ n_cam)) > 0.9:
-                fallback = np.array([0.0, 1.0, 0.0])
-            tangent_cam = fallback - float(fallback @ n_cam) * n_cam
-        tangent_cam /= (np.linalg.norm(tangent_cam) + 1e-12)
+        # カメラ座標系で安定した接線（可視化用）を生成
+        tangent_cam = None
+        axis_candidates = [
+            np.array([1.0, 0.0, 0.0]),
+            np.array([0.0, 1.0, 0.0]),
+            np.array([0.0, 0.0, 1.0]),
+        ]
+        for axis in axis_candidates:
+            candidate = axis - float(axis @ n_cam) * n_cam
+            norm_candidate = np.linalg.norm(candidate)
+            if norm_candidate > 1e-6:
+                tangent_cam = candidate / norm_candidate
+                break
+        if tangent_cam is None:
+            tangent_cam = np.array([1.0, 0.0, 0.0])
         binormal_cam = np.cross(n_cam, tangent_cam)
-        binorm_norm = np.linalg.norm(binormal_cam)
-        if binorm_norm < 1e-9:
-            binormal_cam = np.cross(n_cam, np.array([1.0, 0.0, 0.0]))
-            binorm_norm = np.linalg.norm(binormal_cam)
-        binormal_cam /= (binorm_norm + 1e-12)
+        norm_bin_cam = np.linalg.norm(binormal_cam)
+        if norm_bin_cam > 1e-6:
+            binormal_cam /= norm_bin_cam
+        else:
+            binormal_cam = np.cross(n_cam, np.array([0.0, 0.0, 1.0]))
+            binormal_cam /= (np.linalg.norm(binormal_cam) + 1e-12)
         tangent_cam = np.cross(binormal_cam, n_cam)
         tangent_cam /= (np.linalg.norm(tangent_cam) + 1e-12)
 
-        # 4) カメラ座標で publish
+        # 4) カメラ座標で publish (法線・距離・反射点・接線)
         msg_cam = Float64MultiArray()
         msg_cam.data = [
             float(N_cam[0]),
@@ -237,17 +238,34 @@ class MirrorPlaneEstimator(Node):
                 self._warned_missing_out_tf = True
             plane_out_available = False
 
+        R_out = None
         if plane_out_available:
             # map 側へ平面を流す（以降の可視化／平均化ノードの入力）
+            n_out = N_out[:3]
+            d_out = N_out[3]
+            p0_out = -d_out * n_out
             p_plane_out = T_out_cam[:3, :3] @ p_plane_cam + T_out_cam[:3, 3]
             tangent_out = T_out_cam[:3, :3] @ tangent_cam
-            tangent_out = tangent_out - float(tangent_out @ N_out[:3]) * N_out[:3]
-            if np.linalg.norm(tangent_out) < 1e-9:
-                fallback = np.array([1.0, 0.0, 0.0])
-                if abs(float(fallback @ N_out[:3])) > 0.9:
-                    fallback = np.array([0.0, 1.0, 0.0])
-                tangent_out = fallback - float(fallback @ N_out[:3]) * N_out[:3]
+            # Project back to plane to ensure orthogonality
+            tangent_out = tangent_out - float(tangent_out @ n_out) * n_out
+            norm_tangent_out = np.linalg.norm(tangent_out)
+            if norm_tangent_out > 1e-6:
+                tangent_out /= norm_tangent_out
+            else:
+                tangent_out = np.array([1.0, 0.0, 0.0])
+
+            binormal_out = np.cross(n_out, tangent_out)
+            norm_bin_out = np.linalg.norm(binormal_out)
+            if norm_bin_out > 1e-6:
+                binormal_out /= norm_bin_out
+            else:
+                binormal_out = np.cross(n_out, np.array([0.0, 0.0, 1.0]))
+                binormal_out /= (np.linalg.norm(binormal_out) + 1e-12)
+            tangent_out = np.cross(binormal_out, n_out)
             tangent_out /= (np.linalg.norm(tangent_out) + 1e-12)
+            R_out = np.column_stack((tangent_out, binormal_out, n_out))
+            q_out = quat_from_R(R_out)
+
             msg_out = Float64MultiArray()
             msg_out.data = [
                 float(N_out[0]),
@@ -263,21 +281,14 @@ class MirrorPlaneEstimator(Node):
             ]
             self.pub_plane_out.publish(msg_out)
 
-            n_out = N_out[:3]
-            binormal_out = np.cross(n_out, tangent_out)
-            binorm_out_norm = np.linalg.norm(binormal_out)
-            if binorm_out_norm < 1e-9:
-                binormal_out = np.cross(n_out, np.array([1.0, 0.0, 0.0]))
-                binorm_out_norm = np.linalg.norm(binormal_out)
-            binormal_out /= (binorm_out_norm + 1e-12)
-            tangent_out = np.cross(binormal_out, n_out)
-            tangent_out /= (np.linalg.norm(tangent_out) + 1e-12)
-            R_out = np.column_stack((tangent_out, binormal_out, n_out))
-            q_out = quat_from_R(R_out)
         else:
             n_out = None
-            q_out = None
+            d_out = None
+            p0_out = None
             p_plane_out = None
+            tangent_out = None
+            q_out = None
+            R_out = None
 
         # 6) 可視化 TF: 平面の最近点 p0 と法線向き
         if self.publish_tf and self.tf_broadcaster is not None:
@@ -286,6 +297,15 @@ class MirrorPlaneEstimator(Node):
             if now_ns - self._last_log_ns > 1_000_000_000:  # 1秒
                 self.get_logger().info(f'plane_cam: n={n_cam}, d={d_cam:.3f}, p_plane_cam={p_plane_cam}')
                 self._last_log_ns = now_ns
+            binormal_cam = np.cross(n_cam, tangent_cam)
+            norm_bin_cam = np.linalg.norm(binormal_cam)
+            if norm_bin_cam > 1e-6:
+                binormal_cam /= norm_bin_cam
+            else:
+                binormal_cam = np.cross(n_cam, np.array([0.0, 0.0, 1.0]))
+                binormal_cam /= (np.linalg.norm(binormal_cam) + 1e-12)
+            tangent_cam = np.cross(binormal_cam, n_cam)
+            tangent_cam /= (np.linalg.norm(tangent_cam) + 1e-12)
             R_cam = np.column_stack((tangent_cam, binormal_cam, n_cam))
             q_cam = quat_from_R(R_cam)
             tmsg = TransformStamped()
@@ -302,7 +322,7 @@ class MirrorPlaneEstimator(Node):
             self.tf_broadcaster.sendTransform(tmsg)
 
             # 出力フレーム側（出力座標での最近点・法線）
-            if plane_out_available and p_plane_out is not None and q_out is not None:
+            if plane_out_available and p_plane_out is not None and tangent_out is not None and q_out is not None:
                 tmsg2 = TransformStamped()
                 tmsg2.header.stamp = stamp_now
                 tmsg2.header.frame_id = self.out_frame
