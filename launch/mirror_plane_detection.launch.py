@@ -4,6 +4,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
 from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 from ament_index_python.packages import get_package_share_directory
 
 def generate_launch_description():
@@ -45,6 +46,7 @@ def generate_launch_description():
     tag_tf_timeout = LaunchConfiguration("tag_tf_timeout_sec")
     mapper_plane_topic = LaunchConfiguration("mapper_plane_topic")
     mapper_frame_id = LaunchConfiguration("mapper_frame_id")
+    mapper_publish_markers = LaunchConfiguration("mapper_publish_markers")
 
     return LaunchDescription([
         # 引数宣言（デフォルトは現状コードと合わせています）
@@ -105,6 +107,11 @@ def generate_launch_description():
             "mapper_frame_id",
             default_value="map",
             description="mirror_plane_mapper がマーカーを描画するフレームID",
+        ),
+        DeclareLaunchArgument(
+            "mapper_publish_markers",
+            default_value="true",
+            description="mirror_plane_mapper で MarkerArray を publish するかどうか",
         ),
 
         # --- AprilTag Detection ノード ---
@@ -177,6 +184,7 @@ def generate_launch_description():
                 "angle_threshold_deg": plane_angle_threshold,
                 "distance_threshold":  plane_distance_threshold,
                 "display_timeout_sec": plane_display_timeout,
+                "publish_markers": ParameterValue(mapper_publish_markers, value_type=bool),
                 "use_sim_time": use_sim_time,
             }],
         ),

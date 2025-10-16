@@ -22,6 +22,7 @@ R = I - 2 n n^T,  t = 2 d n
 から S を構成でき、上式の関係から n と d を復元できる（5.4 単一画像推定）。
 """
 
+import math
 import numpy as np
 
 import rclpy
@@ -51,8 +52,6 @@ class MirrorPlaneEstimator(Node):
         self.declare_parameter('t_ct_xyz', [0.017545,-0.080829,-0.021476])  # [m]
         self.declare_parameter('t_ct_rpy', [-0.023080,0.001224,-3.131105])  # [rad] roll, pitch, yaw
         self.declare_parameter('publish_tf', True)  # 可視化TFを出すか
-        self.declare_parameter('publish_marker', False)  # RViz 用 Marker を出すか
-        self.declare_parameter('marker_scale', [0.3, 0.3, 0.01])  # マーカーの幅・高さ・厚み[m]
         self.declare_parameter('tag_tf_timeout_sec', 0.5)  # 鏡像タグの TF がこの秒数古ければ無効とみなす
 
         # ---- パラメータ取得 ----
@@ -62,8 +61,6 @@ class MirrorPlaneEstimator(Node):
         t_ct_xyz = np.array(self.get_parameter('t_ct_xyz').value, dtype=float)
         t_ct_rpy = np.array(self.get_parameter('t_ct_rpy').value, dtype=float)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
-        self.publish_marker = bool(self.get_parameter('publish_marker').value)
-        self.marker_scale = np.array(self.get_parameter('marker_scale').value, dtype=float)
         self.tag_tf_timeout = float(self.get_parameter('tag_tf_timeout_sec').value)
         # 実タグ→カメラ: T_c<-t を4x4に構成
         R_ct = rot_from_rpy(t_ct_rpy[0], t_ct_rpy[1], t_ct_rpy[2])
@@ -82,7 +79,6 @@ class MirrorPlaneEstimator(Node):
         # 数値は Float64MultiArray として出し、可視化は別ノード（mapper）に任せる
         self.pub_plane_cam = self.create_publisher(Float64MultiArray, 'mirror_plane_cam', 10)
         self.pub_plane_out = self.create_publisher(Float64MultiArray, 'mirror_plane', 10)  # output_frame側で出す
-        self.marker_pub = self.create_publisher(Marker, 'mirror_plane_marker', 1) if self.publish_marker else None
 
         # ---- タイマ（30Hz） ----
         self.timer = self.create_timer(1.0/30.0, self.tick)
@@ -111,8 +107,6 @@ class MirrorPlaneEstimator(Node):
                 self.get_logger().warn(
                     f'No TF: {self.cam_frame} <- {self.tag_frame} ({ex}); stop publishing mirror plane'
                 )
-                if self.publish_marker and self.marker_pub is not None:
-                    self._publish_marker_delete()
                 self._plane_visible = False
             return  # そのフレームでタグが見えない
 
@@ -129,8 +123,6 @@ class MirrorPlaneEstimator(Node):
                 )
                 self._warned_stale_tag_tf = True
             if self._plane_visible:
-                if self.publish_marker and self.marker_pub is not None:
-                    self._publish_marker_delete()
                 self._plane_visible = False
             return
         self._warned_stale_tag_tf = False
@@ -169,21 +161,36 @@ class MirrorPlaneEstimator(Node):
             # 2) 二等分面を必ず通るよう d を上書き
             m = 0.5 * (p_real + p_virt)
             d_cam = - float(n_cam @ m)
+        trans_vec = np.array(trans, dtype=float)
+        denom = float(n_cam @ trans_vec)
+        residual_trans = float(n_cam @ trans_vec) + d_cam
+        proj_cam = trans_vec - residual_trans * n_cam
+
+        self.get_logger().info(
+            "Plane debug: "
+            f"norm_dir={norm_dir:.6f}, "
+            f"dot_dir={float(n_cam @ dir_vec):.6f}, "
+            f"denom={denom:.6f}, "
+            f"residual_trans={residual_trans:.6f}"
+        )
 
         N_cam = np.array([n_cam[0], n_cam[1], n_cam[2], d_cam], dtype=float)
 
         # 鏡像タグ方向の線分と平面との交点（反射点）を算出
-        p_plane_cam = -d_cam * n_cam  # フォールバック: 最近点
-        denom = float(n_cam @ np.array(trans, dtype=float))
-        if abs(denom) > 1e-9:
-            scale = -d_cam / denom
-            if scale > 0.0:
-                p_plane_cam = scale * np.array(trans, dtype=float)
+        MIN_PROJECTION_DISTANCE = 0.05
+        MIN_REAL_PLANE_DISTANCE = 0.05
+        MIN_TANGENT_NORM = 1e-2
+
+        p0_cam = -d_cam * n_cam                     # 平面の最近点
+        p_plane_cam = proj_cam                      # 鏡像タグ中心の平面への直交投影点
+        dist_real = np.linalg.norm(p_plane_cam - p_real)
 
         diff_real_virtual = p_real - p_virt
         tangent_candidate = diff_real_virtual - float(diff_real_virtual @ n_cam) * n_cam
-        if np.linalg.norm(tangent_candidate) > 1e-6:
-            tangent_cam = tangent_candidate / np.linalg.norm(tangent_candidate)
+        reliable_tangent = True
+        tangent_norm_candidate = np.linalg.norm(tangent_candidate)
+        if tangent_norm_candidate > MIN_TANGENT_NORM:
+            tangent_cam = tangent_candidate / tangent_norm_candidate
         else:
             axis_candidates = [
                 np.array([1.0, 0.0, 0.0]),
@@ -199,15 +206,36 @@ class MirrorPlaneEstimator(Node):
                     break
             if tangent_cam is None:
                 tangent_cam = np.array([1.0, 0.0, 0.0])
+            reliable_tangent = False
         binormal_cam = np.cross(n_cam, tangent_cam)
         norm_bin_cam = np.linalg.norm(binormal_cam)
-        if norm_bin_cam > 1e-6:
+        if norm_bin_cam > MIN_TANGENT_NORM:
             binormal_cam /= norm_bin_cam
         else:
             binormal_cam = np.cross(n_cam, np.array([0.0, 0.0, 1.0]))
             binormal_cam /= (np.linalg.norm(binormal_cam) + 1e-12)
+            reliable_tangent = False
         tangent_cam = np.cross(binormal_cam, n_cam)
-        tangent_cam /= (np.linalg.norm(tangent_cam) + 1e-12)
+        tangent_norm = np.linalg.norm(tangent_cam)
+        if tangent_norm > MIN_TANGENT_NORM:
+            tangent_cam /= tangent_norm
+        else:
+            reliable_tangent = False
+
+        expected_normal = np.array([0.0, 0.0, -1.0])
+        cos_angle = float(np.clip(n_cam @ expected_normal, -1.0, 1.0))
+        angle_deg = math.degrees(math.acos(cos_angle))
+        if angle_deg > 180.0:
+            angle_deg = 360.0 - angle_deg
+        reliable_tf = reliable_tangent and angle_deg <= 50.0
+        if not reliable_tf:
+            if self.publish_tf and self.tf_broadcaster is not None:
+                self.get_logger().debug(
+                    "Skipping mirror plane output due to reliability filters "
+                    f"(residual_trans={residual_trans:.3f} m, dist_real={dist_real:.3f} m, "
+                    f"tangent_norm={tangent_norm:.3f})"
+                )
+            return
 
         # 4) カメラ座標で publish (法線・距離・反射点・接線)
         msg_cam = Float64MultiArray()
@@ -260,6 +288,7 @@ class MirrorPlaneEstimator(Node):
                 tangent_out /= norm_tangent_out
             else:
                 tangent_out = np.array([1.0, 0.0, 0.0])
+                reliable_tf = False
 
             binormal_out = np.cross(n_out, tangent_out)
             norm_bin_out = np.linalg.norm(binormal_out)
@@ -268,6 +297,7 @@ class MirrorPlaneEstimator(Node):
             else:
                 binormal_out = np.cross(n_out, np.array([0.0, 0.0, 1.0]))
                 binormal_out /= (np.linalg.norm(binormal_out) + 1e-12)
+                reliable_tf = False
             tangent_out = np.cross(binormal_out, n_out)
             tangent_out /= (np.linalg.norm(tangent_out) + 1e-12)
             R_out = np.column_stack((tangent_out, binormal_out, n_out))
@@ -298,7 +328,8 @@ class MirrorPlaneEstimator(Node):
             R_out = None
 
         # 6) 可視化 TF: 平面の最近点 p0 と法線向き
-        if self.publish_tf and self.tf_broadcaster is not None:
+        if self.publish_tf and self.tf_broadcaster is not None and reliable_tf:
+            anchor_cam = p_plane_cam
             # カメラ座標側
             now_ns = now_ros.nanoseconds
             if now_ns - self._last_log_ns > 1_000_000_000:  # 1秒
@@ -319,9 +350,9 @@ class MirrorPlaneEstimator(Node):
             tmsg.header.stamp = stamp_now
             tmsg.header.frame_id = self.cam_frame
             tmsg.child_frame_id = 'mirror_plane_cam'
-            tmsg.transform.translation.x = float(p_plane_cam[0])
-            tmsg.transform.translation.y = float(p_plane_cam[1])
-            tmsg.transform.translation.z = float(p_plane_cam[2])
+            tmsg.transform.translation.x = float(anchor_cam[0])
+            tmsg.transform.translation.y = float(anchor_cam[1])
+            tmsg.transform.translation.z = float(anchor_cam[2])
             tmsg.transform.rotation.x = float(q_cam[0])
             tmsg.transform.rotation.y = float(q_cam[1])
             tmsg.transform.rotation.z = float(q_cam[2])
@@ -330,82 +361,23 @@ class MirrorPlaneEstimator(Node):
 
             # 出力フレーム側（出力座標での最近点・法線）
             if plane_out_available and p_plane_out is not None and tangent_out is not None and q_out is not None:
+                anchor_out = p_plane_out if p0_out is not None and np.linalg.norm(p_plane_out - p0_out) > 1e-6 else p0_out
+                if anchor_out is None:
+                    anchor_out = p_plane_out
+                offset_out = float(n_out @ anchor_out) + d_out
+                anchor_out = anchor_out - offset_out * n_out
                 tmsg2 = TransformStamped()
                 tmsg2.header.stamp = stamp_now
                 tmsg2.header.frame_id = self.out_frame
                 tmsg2.child_frame_id = 'mirror_plane'
-                tmsg2.transform.translation.x = float(p_plane_out[0])
-                tmsg2.transform.translation.y = float(p_plane_out[1])
-                tmsg2.transform.translation.z = float(p_plane_out[2])
+                tmsg2.transform.translation.x = float(anchor_out[0])
+                tmsg2.transform.translation.y = float(anchor_out[1])
+                tmsg2.transform.translation.z = float(anchor_out[2])
                 tmsg2.transform.rotation.x = float(q_out[0])
                 tmsg2.transform.rotation.y = float(q_out[1])
                 tmsg2.transform.rotation.z = float(q_out[2])
                 tmsg2.transform.rotation.w = float(q_out[3])
                 self.tf_broadcaster.sendTransform(tmsg2)
-            else:
-                tmsg2 = TransformStamped()
-                tmsg2.header.stamp = stamp_now
-                tmsg2.header.frame_id = self.out_frame
-                tmsg2.child_frame_id = 'mirror_plane'
-                tmsg2.transform.translation.x = 0.0
-                tmsg2.transform.translation.y = 0.0
-                tmsg2.transform.translation.z = 0.0
-                tmsg2.transform.rotation.x = 0.0
-                tmsg2.transform.rotation.y = 0.0
-                tmsg2.transform.rotation.z = 0.0
-                tmsg2.transform.rotation.w = 1.0
-                self.tf_broadcaster.sendTransform(tmsg2)
-
-        if self.publish_marker and self.marker_pub is not None:
-            self._publish_plane_marker(stamp_now, p_plane_out, n_out)
-
-    def _publish_plane_marker(self, stamp, position, normal):
-        if position is None or normal is None:
-            self._publish_marker_delete()
-            return
-        # normal 可視化のための矢印
-        marker = Marker()
-        marker.header.frame_id = self.out_frame
-        marker.header.stamp = stamp
-        marker.ns = 'mirror_plane'
-        marker.id = 0
-        marker.type = Marker.ARROW
-        marker.action = Marker.ADD
-        marker.pose.orientation.x = 0.0
-        marker.pose.orientation.y = 0.0
-        marker.pose.orientation.z = 0.0
-        marker.pose.orientation.w = 1.0
-        marker.pose.position.x = 0.0
-        marker.pose.position.y = 0.0
-        marker.pose.position.z = 0.0
-        # ARROWタイプでは points[0]=start, points[1]=end
-        start = Point()
-        start.x, start.y, start.z = map(float, position)
-        length = float(self.marker_scale[0])
-        end = Point()
-        end.x = float(position[0] + normal[0] * length)
-        end.y = float(position[1] + normal[1] * length)
-        end.z = float(position[2] + normal[2] * length)
-        marker.points = [start, end]
-        # scale.x=shaft diameter, scale.y=head diameter, scale.z=head length
-        marker.scale.x = float(max(self.marker_scale[1], 1e-3))
-        marker.scale.y = float(max(self.marker_scale[2], 1e-3))
-        marker.scale.z = float(max(self.marker_scale[2], 1e-3))
-        marker.color.r = 0.2
-        marker.color.g = 0.8
-        marker.color.b = 1.0
-        marker.color.a = 0.6
-        self.marker_pub.publish(marker)
-
-    def _publish_marker_delete(self):
-        # RViz から既存のマーカーを確実に取り除くための DELETE メッセージ
-        marker = Marker()
-        marker.header.frame_id = self.out_frame
-        marker.header.stamp = self.get_clock().now().to_msg()
-        marker.ns = 'mirror_plane'
-        marker.id = 0
-        marker.action = Marker.DELETE
-        self.marker_pub.publish(marker)
 
 
 def main():

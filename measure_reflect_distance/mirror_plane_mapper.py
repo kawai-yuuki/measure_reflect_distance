@@ -75,6 +75,7 @@ class MirrorPlaneMapper(Node):
         self.declare_parameter("marker_topic", "mirror_plane_map_markers")
         self.declare_parameter("marker_scale", [0.1, 0.1, 0.01])
         self.declare_parameter("publish_period_sec", 0.5)
+        self.declare_parameter("publish_markers", True)
 
         plane_topic = self.get_parameter("plane_topic").get_parameter_value().string_value
         self.frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
@@ -84,6 +85,7 @@ class MirrorPlaneMapper(Node):
             dtype=float,
         )
         publish_period = max(self.get_parameter("publish_period_sec").get_parameter_value().double_value, 0.1)
+        self.publish_markers = bool(self.get_parameter("publish_markers").value)
 
         self._observations: Dict[int, PlaneObservation] = {}
         self._active_marker_ids: Set[int] = set()
@@ -91,14 +93,22 @@ class MirrorPlaneMapper(Node):
 
         self.create_subscription(Float64MultiArray, plane_topic, self._plane_callback, 10)
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
-        self.timer = self.create_timer(publish_period, self._publish_markers)
-
-        self.get_logger().info(
-            f"[mirror_plane_mapper] visualizing raw observations from '{plane_topic}' on '{self.marker_topic}' "
-            f"in frame '{self.frame_id}'"
-        )
+        if self.publish_markers:
+            self.timer = self.create_timer(publish_period, self._publish_markers)
+            self.get_logger().info(
+                f"[mirror_plane_mapper] visualizing raw observations from '{plane_topic}' on '{self.marker_topic}' "
+                f"in frame '{self.frame_id}'"
+            )
+        else:
+            self.timer = None
+            self._publish_marker_delete_all()
+            self.get_logger().info(
+                "[mirror_plane_mapper] 'publish_markers' is false; marker output disabled and previous markers cleared"
+            )
 
     def _plane_callback(self, msg: Float64MultiArray) -> None:
+        if not self.publish_markers:
+            return
         if len(msg.data) not in (4, 7, 10):
             self.get_logger().warn(f"Ignoring plane with invalid length: {len(msg.data)}")
             return
@@ -139,7 +149,7 @@ class MirrorPlaneMapper(Node):
         )
 
     def _publish_markers(self) -> None:
-        if not self.marker_pub:
+        if not self.publish_markers or not self.marker_pub:
             return
 
         now_msg = self.get_clock().now().to_msg()
@@ -190,6 +200,20 @@ class MirrorPlaneMapper(Node):
         if markers.markers:
             self.marker_pub.publish(markers)
             self._active_marker_ids.update(current_ids)
+
+    def _publish_marker_delete_all(self) -> None:
+        if not self.marker_pub:
+            return
+        marker = Marker()
+        marker.header.frame_id = self.frame_id
+        marker.header.stamp = self.get_clock().now().to_msg()
+        marker.ns = "mirror_planes"
+        marker.id = 0
+        marker.action = Marker.DELETEALL
+        arr = MarkerArray()
+        arr.markers.append(marker)
+        self.marker_pub.publish(arr)
+        self._active_marker_ids.clear()
 
 
 def main(args=None):
