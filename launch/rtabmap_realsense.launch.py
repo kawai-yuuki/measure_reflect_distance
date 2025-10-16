@@ -13,6 +13,8 @@ def generate_launch_description() -> LaunchDescription:
     cfg_path = os.path.join(pkg_share, "config", "rtabmap_d455.ini")
     rtabmap_share = get_package_share_directory("rtabmap_launch")
     rtabmap_launch = os.path.join(rtabmap_share, "launch", "rtabmap.launch.py")
+    # default_rviz_cfg = os.path.join(rtabmap_share, "launch", "config", "rgbd.rviz")
+    default_rviz_cfg = os.path.join(pkg_share, "config", "debug.rgbd.rviz")  # 独自 rviz 設定
 
     # デフォルト値（ご提示の CLI と同じ）
     defaults = {
@@ -34,6 +36,8 @@ def generate_launch_description() -> LaunchDescription:
         "camera_info_topic": "/camera/camera/color/camera_info",
         "approx_sync": "true",
         "rviz": "true",
+        "rviz_cfg": default_rviz_cfg,
+        "rtabmap_viz": "false",
         "wait_imu_to_init": "true",
         "cfg": cfg_path,
         "use_sim_time": "true",
@@ -68,6 +72,8 @@ def generate_launch_description() -> LaunchDescription:
         _declare("camera_info_topic", defaults["camera_info_topic"], "Camera info topic"),
         _declare("approx_sync", defaults["approx_sync"], "Use approximate time sync (true/false)"),
         _declare("rviz", defaults["rviz"], "Launch RViz (true/false)"),
+        _declare("rviz_cfg", defaults["rviz_cfg"], "Path to RViz config file"),
+        _declare("rtabmap_viz", defaults["rtabmap_viz"], "Launch rtabmap_viz UI (true/false)"),
         _declare("wait_imu_to_init", defaults["wait_imu_to_init"], "Wait IMU before init (true/false)"),
         _declare("cfg", defaults["cfg"], "Path to rtabmap.ini"),
         _declare("odom_args", defaults["odom_args"], "Additional odometry args"),
@@ -87,6 +93,8 @@ def generate_launch_description() -> LaunchDescription:
             "wait_imu_to_init",
             "cfg",
             "odom_args",
+            "rviz_cfg",
+            "rtabmap_viz",
             "use_sim_time",
         ]
     }

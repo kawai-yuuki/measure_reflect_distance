@@ -29,7 +29,7 @@ from rclpy.node import Node
 from rclpy.duration import Duration
 
 from std_msgs.msg import Float64MultiArray
-from geometry_msgs.msg import TransformStamped
+from geometry_msgs.msg import TransformStamped, Point
 from visualization_msgs.msg import Marker
 import tf2_ros
 
@@ -104,6 +104,7 @@ class MirrorPlaneEstimator(Node):
         # 1) 鏡像タグ（仮想タグ）: T_c<-tv を取得
         #    apriltag_ros が camera_frame を親、tag_<ID> を子に出している前提で lookup。
         try:
+            # apriltag_ros publishes camera_frame <- tag_frame. Query latest transform.
             ts = self.tf_buffer.lookup_transform(self.cam_frame, self.tag_frame, query_time)
         except Exception as ex:
             if self._plane_visible:
@@ -121,6 +122,7 @@ class MirrorPlaneEstimator(Node):
         if tag_age < 0.0:
             tag_age = 0.0
         if self.tag_tf_timeout > 0.0 and tag_age > self.tag_tf_timeout:
+            # Stale TF means the tag disappeared from view; stop publishing until it returns.
             if not self._warned_stale_tag_tf:
                 self.get_logger().warn(
                     f'Stale mirror tag TF (age={tag_age:.2f}s > {self.tag_tf_timeout:.2f}s); treating as not visible'
@@ -148,6 +150,7 @@ class MirrorPlaneEstimator(Node):
         T_c_tv = mat4_from_rt(R_ctv, np.array(trans, dtype=float))
 
         # 2) 反射変換 S = T_c<-tv * (T_c<-t)^(-1)
+        #    (カメラから見た仮想タグと実タグの関係行列)
         S = T_c_tv @ inv_T(self.T_c_t)
 
         # 3) S から平面 (n, d) を復元（カメラ座標系）
@@ -177,21 +180,25 @@ class MirrorPlaneEstimator(Node):
             if scale > 0.0:
                 p_plane_cam = scale * np.array(trans, dtype=float)
 
-        # カメラ座標系で安定した接線（可視化用）を生成
-        tangent_cam = None
-        axis_candidates = [
-            np.array([1.0, 0.0, 0.0]),
-            np.array([0.0, 1.0, 0.0]),
-            np.array([0.0, 0.0, 1.0]),
-        ]
-        for axis in axis_candidates:
-            candidate = axis - float(axis @ n_cam) * n_cam
-            norm_candidate = np.linalg.norm(candidate)
-            if norm_candidate > 1e-6:
-                tangent_cam = candidate / norm_candidate
-                break
-        if tangent_cam is None:
-            tangent_cam = np.array([1.0, 0.0, 0.0])
+        diff_real_virtual = p_real - p_virt
+        tangent_candidate = diff_real_virtual - float(diff_real_virtual @ n_cam) * n_cam
+        if np.linalg.norm(tangent_candidate) > 1e-6:
+            tangent_cam = tangent_candidate / np.linalg.norm(tangent_candidate)
+        else:
+            axis_candidates = [
+                np.array([1.0, 0.0, 0.0]),
+                np.array([0.0, 1.0, 0.0]),
+                np.array([0.0, 0.0, 1.0]),
+            ]
+            tangent_cam = None
+            for axis in axis_candidates:
+                candidate = axis - float(axis @ n_cam) * n_cam
+                norm_candidate = np.linalg.norm(candidate)
+                if norm_candidate > 1e-6:
+                    tangent_cam = candidate / norm_candidate
+                    break
+            if tangent_cam is None:
+                tangent_cam = np.array([1.0, 0.0, 0.0])
         binormal_cam = np.cross(n_cam, tangent_cam)
         norm_bin_cam = np.linalg.norm(binormal_cam)
         if norm_bin_cam > 1e-6:
@@ -350,29 +357,39 @@ class MirrorPlaneEstimator(Node):
                 self.tf_broadcaster.sendTransform(tmsg2)
 
         if self.publish_marker and self.marker_pub is not None:
-            self._publish_plane_marker(stamp_now, p_plane_out, q_out)
+            self._publish_plane_marker(stamp_now, p_plane_out, n_out)
 
-    def _publish_plane_marker(self, stamp, position, orientation):
-        if position is None or orientation is None:
+    def _publish_plane_marker(self, stamp, position, normal):
+        if position is None or normal is None:
             self._publish_marker_delete()
             return
-        # mapper ノード導入後は通常無効だが、デバッグ用に残している
+        # normal 可視化のための矢印
         marker = Marker()
         marker.header.frame_id = self.out_frame
         marker.header.stamp = stamp
         marker.ns = 'mirror_plane'
         marker.id = 0
-        marker.type = Marker.CUBE
+        marker.type = Marker.ARROW
         marker.action = Marker.ADD
-        marker.pose.position.x = float(position[0])
-        marker.pose.position.y = float(position[1])
-        marker.pose.position.z = float(position[2])
-        marker.pose.orientation.x = float(orientation[0])
-        marker.pose.orientation.y = float(orientation[1])
-        marker.pose.orientation.z = float(orientation[2])
-        marker.pose.orientation.w = float(orientation[3])
-        marker.scale.x = float(self.marker_scale[0])
-        marker.scale.y = float(self.marker_scale[1])
+        marker.pose.orientation.x = 0.0
+        marker.pose.orientation.y = 0.0
+        marker.pose.orientation.z = 0.0
+        marker.pose.orientation.w = 1.0
+        marker.pose.position.x = 0.0
+        marker.pose.position.y = 0.0
+        marker.pose.position.z = 0.0
+        # ARROWタイプでは points[0]=start, points[1]=end
+        start = Point()
+        start.x, start.y, start.z = map(float, position)
+        length = float(self.marker_scale[0])
+        end = Point()
+        end.x = float(position[0] + normal[0] * length)
+        end.y = float(position[1] + normal[1] * length)
+        end.z = float(position[2] + normal[2] * length)
+        marker.points = [start, end]
+        # scale.x=shaft diameter, scale.y=head diameter, scale.z=head length
+        marker.scale.x = float(max(self.marker_scale[1], 1e-3))
+        marker.scale.y = float(max(self.marker_scale[2], 1e-3))
         marker.scale.z = float(max(self.marker_scale[2], 1e-3))
         marker.color.r = 0.2
         marker.color.g = 0.8

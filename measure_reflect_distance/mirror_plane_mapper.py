@@ -73,7 +73,7 @@ class MirrorPlaneMapper(Node):
         self.declare_parameter("plane_topic", "mirror_plane")
         self.declare_parameter("frame_id", "map")
         self.declare_parameter("marker_topic", "mirror_plane_map_markers")
-        self.declare_parameter("marker_scale", [0.6, 0.6, 0.02])
+        self.declare_parameter("marker_scale", [0.1, 0.1, 0.01])
         self.declare_parameter("publish_period_sec", 0.5)
 
         plane_topic = self.get_parameter("plane_topic").get_parameter_value().string_value
