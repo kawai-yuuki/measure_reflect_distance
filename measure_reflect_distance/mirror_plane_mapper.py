@@ -114,6 +114,16 @@ class PlaneCluster:
         self.last_update = stamp_sec
 
 
+@dataclass
+class PlaneObservation:
+    marker_id: int
+    normal: np.ndarray
+    distance: float
+    point: np.ndarray
+    tangent: np.ndarray
+    stamp_sec: float
+
+
 class MirrorPlaneMapper(Node):
     """
     鏡面推定の観測を DP-planes に基づくクラスタリングで統合し、鏡面ごとに代表マーカーを出力するノード。
@@ -129,6 +139,7 @@ class MirrorPlaneMapper(Node):
         self.declare_parameter("marker_scale", [0.1, 0.1, 0.01])
         self.declare_parameter("publish_period_sec", 0.5)
         self.declare_parameter("publish_markers", True)
+        self.declare_parameter("use_clustering", False)
         self.declare_parameter("dp_lambda", 0.10)  # [m] DP-planes のクラスタ生成閾値
         self.declare_parameter("cluster_stale_time_sec", 0.0)
         self.declare_parameter("cluster_min_support", 3)
@@ -142,12 +153,15 @@ class MirrorPlaneMapper(Node):
         )
         publish_period = max(self.get_parameter("publish_period_sec").get_parameter_value().double_value, 0.1)
         self.publish_markers = bool(self.get_parameter("publish_markers").value)
+        self.use_clustering = bool(self.get_parameter("use_clustering").value)
         self.dp_lambda = max(0.0, float(self.get_parameter("dp_lambda").value))
         self.cluster_stale_time = max(0.0, float(self.get_parameter("cluster_stale_time_sec").value))
         self.cluster_min_support = max(1, int(self.get_parameter("cluster_min_support").value))
 
         # --- 状態 ---
         self._clusters: Dict[int, PlaneCluster] = {}
+        self._observations: Dict[int, PlaneObservation] = {}
+        self._next_marker_id = 0
         self._active_marker_ids: Set[int] = set()
         self._next_cluster_id = 0
 
@@ -156,10 +170,13 @@ class MirrorPlaneMapper(Node):
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
         if self.publish_markers:
             self.timer = self.create_timer(publish_period, self._publish_markers)
-            self.get_logger().info(
-                "[mirror_plane_mapper] DP-planes clustering enabled: "
-                f"lambda={self.dp_lambda:.3f} m, min_support={self.cluster_min_support}"
-            )
+            if self.use_clustering:
+                self.get_logger().info(
+                    "[mirror_plane_mapper] DP-planes clustering enabled: "
+                    f"lambda={self.dp_lambda:.3f} m, min_support={self.cluster_min_support}"
+                )
+            else:
+                self.get_logger().info("[mirror_plane_mapper] clustering disabled; visualizing each observation")
         else:
             self.timer = None
             self._publish_marker_delete_all()
@@ -200,7 +217,19 @@ class MirrorPlaneMapper(Node):
         tangent = _safe_normalize(tangent)
 
         stamp_sec = self.get_clock().now().nanoseconds / 1e9
-        self._assign_observation(point, normal, tangent, stamp_sec)
+        if self.use_clustering:
+            self._assign_observation(point, normal, tangent, stamp_sec)
+        else:
+            marker_id = self._next_marker_id
+            self._next_marker_id += 1
+            self._observations[marker_id] = PlaneObservation(
+                marker_id=marker_id,
+                normal=normal,
+                distance=distance,
+                point=point,
+                tangent=tangent,
+                stamp_sec=stamp_sec,
+            )
 
     def _assign_observation(self, point: np.ndarray, normal: np.ndarray,
                             tangent: np.ndarray, stamp_sec: float) -> None:
@@ -250,45 +279,75 @@ class MirrorPlaneMapper(Node):
         now_msg = now_ros_time.to_msg()
         now_sec = now_ros_time.nanoseconds / 1e9
 
-        self._expire_stale_clusters(now_sec)
-
         markers = MarkerArray()
         current_ids: Set[int] = set()
 
-        for cluster in self._clusters.values():
-            if cluster.count < self.cluster_min_support:
-                continue
+        if self.use_clustering:
+            self._expire_stale_clusters(now_sec)
 
-            normal = cluster.representative_normal()
-            tangent = cluster.representative_tangent()
-            point = cluster.representative_point()
-            basis = _build_basis(normal, tangent)
-            q = quat_from_R(basis)
+            for cluster in self._clusters.values():
+                if cluster.count < self.cluster_min_support:
+                    continue
 
-            marker = Marker()
-            marker.header.frame_id = self.frame_id
-            marker.header.stamp = now_msg
-            marker.ns = "mirror_planes"
-            marker.id = cluster.cluster_id
-            marker.type = Marker.CUBE
-            marker.action = Marker.ADD
-            marker.pose.position.x = float(point[0])
-            marker.pose.position.y = float(point[1])
-            marker.pose.position.z = float(point[2])
-            marker.pose.orientation.x = float(q[0])
-            marker.pose.orientation.y = float(q[1])
-            marker.pose.orientation.z = float(q[2])
-            marker.pose.orientation.w = float(q[3])
-            marker.scale.x = float(self.marker_scale[0])
-            marker.scale.y = float(self.marker_scale[1])
-            marker.scale.z = float(max(self.marker_scale[2], 1e-3))
-            marker.color.r = 0.2
-            marker.color.g = 0.8
-            marker.color.b = 1.0
-            marker.color.a = 0.7
+                normal = cluster.representative_normal()
+                tangent = cluster.representative_tangent()
+                point = cluster.representative_point()
+                basis = _build_basis(normal, tangent)
+                q = quat_from_R(basis)
 
-            markers.markers.append(marker)
-            current_ids.add(cluster.cluster_id)
+                marker = Marker()
+                marker.header.frame_id = self.frame_id
+                marker.header.stamp = now_msg
+                marker.ns = "mirror_planes"
+                marker.id = cluster.cluster_id
+                marker.type = Marker.CUBE
+                marker.action = Marker.ADD
+                marker.pose.position.x = float(point[0])
+                marker.pose.position.y = float(point[1])
+                marker.pose.position.z = float(point[2])
+                marker.pose.orientation.x = float(q[0])
+                marker.pose.orientation.y = float(q[1])
+                marker.pose.orientation.z = float(q[2])
+                marker.pose.orientation.w = float(q[3])
+                marker.scale.x = float(self.marker_scale[0])
+                marker.scale.y = float(self.marker_scale[1])
+                marker.scale.z = float(max(self.marker_scale[2], 1e-3))
+                marker.color.r = 0.2
+                marker.color.g = 0.8
+                marker.color.b = 1.0
+                marker.color.a = 0.7
+
+                markers.markers.append(marker)
+                current_ids.add(cluster.cluster_id)
+        else:
+            for obs in self._observations.values():
+                basis = _build_basis(obs.normal, obs.tangent)
+                q = quat_from_R(basis)
+
+                marker = Marker()
+                marker.header.frame_id = self.frame_id
+                marker.header.stamp = now_msg
+                marker.ns = "mirror_planes"
+                marker.id = obs.marker_id
+                marker.type = Marker.CUBE
+                marker.action = Marker.ADD
+                marker.pose.position.x = float(obs.point[0])
+                marker.pose.position.y = float(obs.point[1])
+                marker.pose.position.z = float(obs.point[2])
+                marker.pose.orientation.x = float(q[0])
+                marker.pose.orientation.y = float(q[1])
+                marker.pose.orientation.z = float(q[2])
+                marker.pose.orientation.w = float(q[3])
+                marker.scale.x = float(self.marker_scale[0])
+                marker.scale.y = float(self.marker_scale[1])
+                marker.scale.z = float(max(self.marker_scale[2], 1e-3))
+                marker.color.r = 0.2
+                marker.color.g = 0.8
+                marker.color.b = 1.0
+                marker.color.a = 0.7
+
+                markers.markers.append(marker)
+                current_ids.add(obs.marker_id)
 
         # 古いマーカーを削除
         for marker_id in list(self._active_marker_ids - current_ids):
@@ -304,7 +363,7 @@ class MirrorPlaneMapper(Node):
         if markers.markers:
             self.marker_pub.publish(markers)
             self._active_marker_ids.update(current_ids)
-        else:
+        elif self.use_clustering:
             self._publish_marker_delete_all()
 
     def _expire_stale_clusters(self, now_sec: float) -> None:
