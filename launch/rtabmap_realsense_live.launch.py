@@ -5,8 +5,10 @@ from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from ament_index_python.packages import get_package_share_directory
 
+
 def _declare(name: str, default: str, desc: str) -> DeclareLaunchArgument:
     return DeclareLaunchArgument(name=name, default_value=default, description=desc)
+
 
 def generate_launch_description() -> LaunchDescription:
     pkg_share = get_package_share_directory("measure_reflect_distance")
@@ -14,21 +16,20 @@ def generate_launch_description() -> LaunchDescription:
     rtabmap_share = get_package_share_directory("rtabmap_launch")
     rtabmap_launch = os.path.join(rtabmap_share, "launch", "rtabmap.launch.py")
     # default_rviz_cfg = os.path.join(rtabmap_share, "launch", "config", "rgbd.rviz")
-    default_rviz_cfg = os.path.join(pkg_share, "config", "debug.rgbd.rviz")  # 独自 rviz 設定
+    default_rviz_cfg = os.path.join(pkg_share, "config", "debug.rgbd.rviz")  # 独自 RViz 設定
 
-    # デフォルト値（ご提示の CLI と同じ）
     defaults = {
         "frame_id": "camera_link",
         "args": (
             "-d "
             "--Optimizer/Strategy 2 "
             "--Vis/CorNNDR 0.75 "
-            "--Vis/MaxFeatures 1500 "
+            "--Vis/MaxFeatures 2000 "
             "--RGBD/CreateOccupancyGrid  true "
             "--Grid/CellSize 0.05 "
-            "--Vis/InlierDistance 0.03 "
-            "--Icp/MaxCorrespondenceDistance 0.05 "
-            "--Vis/MinInliers 30 "
+            "--Vis/InlierDistance 0.05 "
+            "--Icp/MaxCorrespondenceDistance 0.07 "
+            "--Vis/MinInliers 15 "
             "--Icp/Iterations 30 "
         ),
         "rgb_topic": "/camera/camera/color/image_raw",
@@ -40,27 +41,25 @@ def generate_launch_description() -> LaunchDescription:
         "rtabmap_viz": "false",
         "wait_imu_to_init": "true",
         "cfg": cfg_path,
-        "use_sim_time": "true",
-
-        # odometry は odom_args で最小セットを注入（文字列でOK）
+        "use_sim_time": "false",
         # "odom_args": (
         #     "--Reg/Force3DoF true "
         #     "--Vis/FeatureType 6 "
         #     "--ORB/NLevels 8 "
         #     "--ORB/ScaleFactor 1.2 "
         #     "--ORB/EdgeThreshold 31 "
-        #     "--Vis/MaxFeatures 1500 "
-        #     "--Vis/MinInliers 30 "
+        #     "--Vis/MaxFeatures 2000 "
+        #     "--Vis/MinInliers 15 "
         #     "--Vis/MinDepth 0.2 "
         #     "--Vis/MaxDepth 5.0 "
         #     "--Vis/DepthAsMask true "
-        #     "--Vis/InlierDistance 0.03 "
+        #     "--Vis/InlierDistance 0.05 "
         #     "--Vis/CorNNDR 0.75 "
-        #     "--Vis/Iterations 100 "
-        #     "--Odom/VisKeyFrameThr 100 "
-        #     "--Odom/KeyFrameThr 0.6 "
-        #     "--OdomF2M/MaxSize 4000 "
-        #     "--OdomF2M/InitDepthFactor 0.02 "
+        #     "--Vis/Iterations 150 "
+        #     "--Odom/VisKeyFrameThr 120 "
+        #     "--Odom/KeyFrameThr 0.7 "
+        #     "--OdomF2M/MaxSize 5000 "
+        #     "--OdomF2M/InitDepthFactor 0.03 "
         # ),
     }
 
