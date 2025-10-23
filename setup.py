@@ -27,6 +27,7 @@ setup(
             'my_node = measure_reflect_distance.my_node:main',
             'unet_inference_node = measure_reflect_distance.unet_inference_node:main',
             'mask_post_processor_node = measure_reflect_distance.mask_post_processor_node:main',
+            'mirror_surface_projector_node = measure_reflect_distance.mirror_surface_projector_node:main',
             'sync_camera_info = measure_reflect_distance.sync_camera_info:main',
             'mirror_plane_estimation = measure_reflect_distance.mirror_plane_estimation:main',
             'mirror_plane_mapper = measure_reflect_distance.mirror_plane_mapper:main',
