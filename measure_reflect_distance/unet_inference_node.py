@@ -17,6 +17,12 @@ class UNetInferenceNode(Node):
         super().__init__("unet_inference_node")
         self.bridge = CvBridge()
 
+        # --- Parameters ---
+        # self.declare_parameter("image_topic", "/camera/camera/color/image_raw")
+        self.declare_parameter("image_topic", "/camera/unet/image_raw")
+        self.declare_parameter("mask_topic", "/mask_image")
+        self.declare_parameter("max_fps", 15.0)
+
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
         # モデルへの絶対パスを生成
@@ -35,14 +41,26 @@ class UNetInferenceNode(Node):
             T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         ])
 
+        from rclpy.qos import qos_profile_sensor_data
+
+        image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
+        mask_topic = self.get_parameter("mask_topic").get_parameter_value().string_value
+
         self.subscription = self.create_subscription(
-            Image, 
-            '/camera/camera/color/image_raw', 
-            self.image_callback, 
-            10
+            Image,
+            image_topic,
+            self.image_callback,
+            qos_profile_sensor_data,
         )
 
-        self.publisher_ = self.create_publisher(Image, '/mask_image', 10)
+        self.publisher_ = self.create_publisher(Image, mask_topic, 10)
+
+        self.max_fps = float(self.get_parameter("max_fps").get_parameter_value().double_value)
+        if self.max_fps <= 0.0:
+            self.min_interval_ns = 0
+        else:
+            self.min_interval_ns = int(1e9 / self.max_fps)
+        self._last_processed_time = None
 
         # 入力画像と出力マスクのfpsを計算
         self.input_frame_count = 0
@@ -52,7 +70,10 @@ class UNetInferenceNode(Node):
         # 5秒ごとにlog_fps関数を呼び出すタイマーを作成
         self.fps_timer = self.create_timer(5.0, self.log_fps)
 
-        self.get_logger().info("UNet Inference Node has been started.")
+        self.get_logger().info(
+            f"UNet Inference Node has been started (image_topic={image_topic}, "
+            f"mask_topic={mask_topic}, max_fps={self.max_fps:.2f})"
+        )
 
     def log_fps(self):
         current_time = self.get_clock().now()
@@ -72,6 +93,14 @@ class UNetInferenceNode(Node):
     def image_callback(self, msg):
         self.input_frame_count += 1
         try:
+            if self.min_interval_ns > 0:
+                now = self.get_clock().now()
+                if self._last_processed_time is not None:
+                    elapsed_ns = (now - self._last_processed_time).nanoseconds
+                    if elapsed_ns < self.min_interval_ns:
+                        return
+                self._last_processed_time = now
+
             # ROS Imageから OpenCVのImageに変換
             cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
             H, W = cv_image.shape[:2]

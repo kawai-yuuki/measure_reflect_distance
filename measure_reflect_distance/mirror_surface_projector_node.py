@@ -37,6 +37,11 @@ class MirrorSurfaceProjectorNode(Node):
         self.declare_parameter("marker_topic", "mirror_surface_projected_markers")  # Marker の出力トピック
         self.declare_parameter("marker_line_width", 0.01)  # Marker の線幅
         self.declare_parameter("min_mask_area", 200.0)  # 輪郭として扱う最小マスク面積 [pixel]
+        self.declare_parameter("tf_timeout_sec", 0.1)  # TF 取得の待機時間
+        self.declare_parameter("projection_mode", "contour")  # contour / dense
+        self.declare_parameter("pixel_stride", 2)  # dense 投影時の間引き間隔
+        self.declare_parameter("point_scale", 0.03)  # dense 投影時の Marker.POINTS サイズ
+        self.declare_parameter("max_fps", 5.0)  # 投影処理の最大周波数
 
         mask_topic = self.get_parameter("mask_topic").get_parameter_value().string_value  # パラメータからマスクトピックを取得
         camera_info_topic = (  # CameraInfo トピック名を取得
@@ -65,6 +70,27 @@ class MirrorSurfaceProjectorNode(Node):
         )
         self._min_mask_area = max(  # 取り扱う最小マスク面積
             0.0, self.get_parameter("min_mask_area").get_parameter_value().double_value
+        )
+        self._tf_timeout = max(
+            0.0, self.get_parameter("tf_timeout_sec").get_parameter_value().double_value
+        )
+        self._max_fps = float(self.get_parameter("max_fps").get_parameter_value().double_value)
+        if self._max_fps <= 0.0:
+            self._min_interval_ns = 0
+        else:
+            self._min_interval_ns = int(1e9 / self._max_fps)
+        self._last_process_time = None
+        self._projection_mode = self.get_parameter("projection_mode").get_parameter_value().string_value.lower()
+        if self._projection_mode not in ("contour", "dense"):
+            self.get_logger().warn(
+                f"Unknown projection_mode '{self._projection_mode}', fallback to 'contour'."
+            )
+            self._projection_mode = "contour"
+        self._pixel_stride = max(
+            1, int(self.get_parameter("pixel_stride").get_parameter_value().integer_value)
+        )
+        self._point_scale = max(
+            0.001, self.get_parameter("point_scale").get_parameter_value().double_value
         )
 
         self.bridge = CvBridge()  # Image ⇔ OpenCV 変換のためのブリッジを作成
@@ -102,6 +128,14 @@ class MirrorSurfaceProjectorNode(Node):
         camera_frame = camera_info_msg.header.frame_id or self.default_camera_frame  # CameraInfo のフレーム名を取得（空なら既定値）
         self._latest_synced_stamp = mask_time  # 同期時刻を記録
 
+        if self._min_interval_ns > 0:
+            now = self.get_clock().now()
+            if self._last_process_time is not None:
+                elapsed_ns = (now - self._last_process_time).nanoseconds
+                if elapsed_ns < self._min_interval_ns:
+                    return
+            self._last_process_time = now
+
         plane_available = self._latest_plane_msg is not None  # 平面データがあるかを確認
         if not plane_available:
             self._log_throttled_warning(  # 平面データ未受信を一定間隔で警告
@@ -126,11 +160,36 @@ class MirrorSurfaceProjectorNode(Node):
         tf_ok = False  # TF 取得成否フラグ
         try:
             transform = self.tf_buffer.lookup_transform(  # ターゲットフレームからカメラフレームへの TF を取得
-                self.target_frame, camera_frame, mask_time
+                self.target_frame,
+                camera_frame,
+                mask_time,
+                timeout=Duration(seconds=self._tf_timeout),
             )
             tf_ok = True  # TF 取得成功を記録
+        except tf2_ros.ExtrapolationException as ex:
+            latest_time = Time()
+            try:
+                transform = self.tf_buffer.lookup_transform(
+                    self.target_frame,
+                    camera_frame,
+                    latest_time,
+                    timeout=Duration(seconds=self._tf_timeout),
+                )
+                tf_ok = True
+                self.get_logger().debug(
+                    f"Using latest TF for projection due to extrapolation at {mask_time.to_msg()}"
+                )
+            except Exception as ex_latest:
+                self._log_throttled_warning(
+                    "_last_tf_warn_sec",
+                    5.0,
+                    f"TF lookup failed (future extrapolation) for {self.target_frame} <- {camera_frame} "
+                    f"at {mask_time.to_msg()}: {ex}; latest lookup error: {ex_latest}",
+                )
+                self._publish_marker_delete(mask_msg.header.stamp)
+                return
         except Exception as ex:
-            self._log_throttled_warning(  # TF 取得失敗を一定間隔で警告
+            self._log_throttled_warning(
                 "_last_tf_warn_sec",
                 5.0,
                 f"TF lookup failed for {self.target_frame} <- {camera_frame} at {mask_time.to_msg()}: {ex}",
@@ -174,22 +233,37 @@ class MirrorSurfaceProjectorNode(Node):
         origin = np.array([translation.x, translation.y, translation.z], dtype=np.float64)
         R_target_camera = rot_from_quat(rotation.x, rotation.y, rotation.z, rotation.w)  # 回転行列へ変換
 
-        polygons = self._project_mask_to_world(
-            mask_image, fx, fy, cx, cy, origin, R_target_camera, n, d
-        )  # マスク輪郭を 3D 多角形へ変換
-        if not polygons:
-            self._publish_marker_delete(mask_msg.header.stamp)
-            return
+        polygons: Optional[List[List[np.ndarray]]] = None
+        dense_points: Optional[np.ndarray] = None
+        if self._projection_mode == "dense":
+            dense_points = self._project_mask_points(
+                mask_image, fx, fy, cx, cy, origin, R_target_camera, n, d
+            )
+            if dense_points is None or dense_points.size == 0:
+                self._publish_marker_delete(mask_msg.header.stamp)
+                return
+        else:
+            polygons = self._project_mask_to_world(
+                mask_image, fx, fy, cx, cy, origin, R_target_camera, n, d
+            )
+            if not polygons:
+                self._publish_marker_delete(mask_msg.header.stamp)
+                return
 
-        self._publish_markers(mask_msg.header.stamp, polygons)  # MarkerArray として出力
+        self._publish_markers(mask_msg.header.stamp, polygons=polygons, dense_points=dense_points)
 
-        self.get_logger().debug(  # 同期結果の概要をデバッグ出力
-            "Synced inputs at stamp %s (plane=%s, tf=%s, polygons=%d)",
-            mask_time.to_msg(),
-            "yes",
-            "ok" if tf_ok else "ng",
-            len(polygons),
-        )
+        stamp_msg = mask_time.to_msg()
+        tf_status = "ok" if tf_ok else "ng"
+        if self._projection_mode == "dense":
+            points_count = dense_points.shape[0] if dense_points is not None else 0
+            self.get_logger().debug(
+                f"Synced inputs at stamp {stamp_msg} (plane=yes, tf={tf_status}, dense_points={points_count})"
+            )
+        else:
+            poly_count = len(polygons) if polygons is not None else 0
+            self.get_logger().debug(
+                f"Synced inputs at stamp {stamp_msg} (plane=yes, tf={tf_status}, polygons={poly_count})"
+            )
 
     def _project_mask_to_world(
         self,
@@ -238,7 +312,57 @@ class MirrorSurfaceProjectorNode(Node):
 
         return polygons
 
-    def _publish_markers(self, stamp, polygons: List[List[np.ndarray]]) -> None:
+    def _project_mask_points(
+        self,
+        mask_image: np.ndarray,
+        fx: float,
+        fy: float,
+        cx: float,
+        cy: float,
+        origin_target: np.ndarray,
+        R_target_camera: np.ndarray,
+        plane_normal: np.ndarray,
+        plane_offset: float,
+    ) -> Optional[np.ndarray]:
+        """Project mask pixels (with stride) directly onto the plane."""
+        _, binary = cv2.threshold(mask_image, 127, 255, cv2.THRESH_BINARY)
+        ys, xs = np.nonzero(binary)
+        if ys.size == 0:
+            return None
+
+        if self._pixel_stride > 1:
+            stride_mask = ((ys % self._pixel_stride) == 0) & ((xs % self._pixel_stride) == 0)
+            ys = ys[stride_mask]
+            xs = xs[stride_mask]
+            if ys.size == 0:
+                return None
+
+        dirs_camera = np.stack(
+            ((xs - cx) / fx, (ys - cy) / fy, np.ones_like(xs, dtype=np.float64)), axis=1
+        )
+        dir_target = dirs_camera @ R_target_camera.T
+        denom = dir_target @ plane_normal
+        origin_dot = float(plane_normal @ origin_target) + plane_offset
+        valid = np.abs(denom) > 1e-9
+        if not np.any(valid):
+            return None
+        denom = denom[valid]
+        dir_target = dir_target[valid]
+        t = -origin_dot / denom
+        valid = t > 0.0
+        if not np.any(valid):
+            return None
+        dir_target = dir_target[valid]
+        t = t[valid]
+        points = origin_target + dir_target * t[:, None]
+        return points
+
+    def _publish_markers(
+        self,
+        stamp,
+        polygons: Optional[List[List[np.ndarray]]] = None,
+        dense_points: Optional[np.ndarray] = None,
+    ) -> None:
         marker_array = MarkerArray()  # MarkerArray を構築
 
         delete_all = Marker()
@@ -248,33 +372,53 @@ class MirrorSurfaceProjectorNode(Node):
         marker_array.markers.append(delete_all)
 
         marker_id = 0
-        for polygon in polygons:
+        if polygons:
+            for polygon in polygons:
+                marker = Marker()
+                marker.header.frame_id = self.target_frame
+                marker.header.stamp = stamp
+                marker.ns = "mirror_surface_projector"
+                marker.id = marker_id
+                marker.type = Marker.LINE_STRIP
+                marker.action = Marker.ADD
+                marker.scale.x = self.marker_line_width
+                marker.color.r = 0.0
+                marker.color.g = 1.0
+                marker.color.b = 1.0
+                marker.color.a = 0.9
+
+                for point in polygon:
+                    marker.points.append(
+                        Point(x=float(point[0]), y=float(point[1]), z=float(point[2]))
+                    )
+                if polygon:
+                    first = polygon[0]
+                    marker.points.append(
+                        Point(x=float(first[0]), y=float(first[1]), z=float(first[2]))
+                    )  # 終点を始点に戻して閉ループに
+
+                marker_array.markers.append(marker)
+                marker_id += 1
+
+        if dense_points is not None and dense_points.size > 0:
             marker = Marker()
             marker.header.frame_id = self.target_frame
             marker.header.stamp = stamp
-            marker.ns = "mirror_surface_projector"
+            marker.ns = "mirror_surface_projector_dense"
             marker.id = marker_id
-            marker.type = Marker.LINE_STRIP
+            marker.type = Marker.POINTS
             marker.action = Marker.ADD
-            marker.scale.x = self.marker_line_width
+            marker.scale.x = self._point_scale
+            marker.scale.y = self._point_scale
             marker.color.r = 0.0
             marker.color.g = 1.0
             marker.color.b = 1.0
-            marker.color.a = 0.9
-            marker.lifetime = Duration(seconds=0.5).to_msg()
-
-            for point in polygon:
+            marker.color.a = 0.6
+            for point in dense_points:
                 marker.points.append(
                     Point(x=float(point[0]), y=float(point[1]), z=float(point[2]))
                 )
-            if polygon:
-                first = polygon[0]
-                marker.points.append(
-                    Point(x=float(first[0]), y=float(first[1]), z=float(first[2]))
-                )  # 終点を始点に戻して閉ループに
-
             marker_array.markers.append(marker)
-            marker_id += 1
 
         self.marker_pub.publish(marker_array)
 

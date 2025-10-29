@@ -6,6 +6,13 @@ import rclpy
 from cv_bridge import CvBridge, CvBridgeError
 from message_filters import ApproximateTimeSynchronizer, Subscriber
 from rclpy.node import Node
+from rclpy.qos import (
+    qos_profile_sensor_data,
+    QoSProfile,
+    ReliabilityPolicy,
+    HistoryPolicy,
+    DurabilityPolicy,
+)
 from sensor_msgs.msg import Image
 
 
@@ -45,10 +52,16 @@ class MaskPostProcessingNode(Node):
             slop = 0.05
 
         self.bridge = CvBridge()
-        self.publisher_ = self.create_publisher(Image, output_topic, 10)
+        reliable_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+            durability=DurabilityPolicy.VOLATILE,
+        )
+        self.publisher_ = self.create_publisher(Image, output_topic, reliable_qos)
 
-        self.rgb_sub = Subscriber(self, Image, rgb_topic)
-        self.mask_sub = Subscriber(self, Image, mask_topic)
+        self.rgb_sub = Subscriber(self, Image, rgb_topic, qos_profile=qos_profile_sensor_data)
+        self.mask_sub = Subscriber(self, Image, mask_topic, qos_profile=qos_profile_sensor_data)
         self.synchronizer = ApproximateTimeSynchronizer(
             [self.rgb_sub, self.mask_sub],
             queue_size=queue_size,
