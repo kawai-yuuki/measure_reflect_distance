@@ -53,6 +53,7 @@ class MirrorPlaneEstimator(Node):
         self.declare_parameter('t_ct_rpy', [-0.023080,0.001224,-3.131105])  # [rad] roll, pitch, yaw
         self.declare_parameter('publish_tf', True)  # 可視化TFを出すか
         self.declare_parameter('tag_tf_timeout_sec', 0.5)  # 鏡像タグの TF がこの秒数古ければ無効とみなす
+        self.declare_parameter('max_detection_distance', 4.0)  # 実タグ-鏡像タグの距離上限 [m]
 
         # ---- パラメータ取得 ----
         self.cam_frame = self.get_parameter('camera_frame').value
@@ -62,6 +63,7 @@ class MirrorPlaneEstimator(Node):
         t_ct_rpy = np.array(self.get_parameter('t_ct_rpy').value, dtype=float)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
         self.tag_tf_timeout = float(self.get_parameter('tag_tf_timeout_sec').value)
+        self.max_detection_distance = float(self.get_parameter('max_detection_distance').value)
         # 実タグ→カメラ: T_c<-t を4x4に構成
         R_ct = rot_from_rpy(t_ct_rpy[0], t_ct_rpy[1], t_ct_rpy[2])
         self.T_c_t = mat4_from_rt(R_ct, t_ct_xyz)
@@ -153,6 +155,14 @@ class MirrorPlaneEstimator(Node):
 
         dir_vec = p_real - p_virt
         norm_dir = np.linalg.norm(dir_vec)
+        if self.max_detection_distance > 0.0 and norm_dir > self.max_detection_distance:
+            self.get_logger().debug(
+                f'Skipping mirror plane output: tag distance {norm_dir:.2f} m exceeds limit '
+                f'{self.max_detection_distance:.2f} m'
+            )
+            if self._plane_visible:
+                self._plane_visible = False
+            return
         if norm_dir > 1e-9:
             # 1) 向き補正：n_cam を (p_real - p_virt) と同方向に
             if float(n_cam @ dir_vec) < 0.0:

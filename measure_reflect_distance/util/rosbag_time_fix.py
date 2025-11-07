@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import argparse
 import sys
-from collections import defaultdict
+from collections import defaultdict, deque
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Deque, Dict, Iterable, List, Optional, Set, Tuple
 
 import rclpy
 from rclpy.serialization import deserialize_message, serialize_message
@@ -49,9 +50,11 @@ def parse_args() -> argparse.Namespace:
         help='参照 bag の storage_id（未指定なら --storage と同じ）',
     )
     parser.add_argument(
-        '--ensure-monotonic',
-        action='store_true',
-        help='timestamp が巻き戻る場合に 1ns ずつ進めて単調増加を保証する',
+        '--sync-pair',
+        action='append',
+        default=[],
+        metavar='PRIMARY:SECONDARY',
+        help='SECONDARY トピックのタイムスタンプとヘッダを PRIMARY に合わせる（複数指定可）',
     )
     parser.add_argument(
         '--rewrite-header',
@@ -86,21 +89,49 @@ def compute_storage_bounds(uri: str, storage_id: str) -> Tuple[Optional[int], Op
     return min_t, max_t
 
 
-def load_reference_timestamps(uri: str, storage_id: str) -> Tuple[Dict[str, List[int]], Optional[int], Optional[int]]:
+@dataclass
+class ReferenceEntry:
+    storage_stamp: int
+    header_stamp: Optional[int]
+
+
+def load_reference_data(
+    uri: str,
+    storage_id: str,
+) -> Tuple[
+    Dict[str, List[ReferenceEntry]],
+    Dict[str, Dict[int, Deque[ReferenceEntry]]],
+    Optional[int],
+    Optional[int],
+]:
     reader = open_reader(uri, storage_id)
-    timestamps: Dict[str, List[int]] = defaultdict(list)
+    topics = reader.get_all_topics_and_types()
+    type_map = {topic.name: topic.type for topic in topics}
+    entries: Dict[str, List[ReferenceEntry]] = defaultdict(list)
+    header_lookup: Dict[str, Dict[int, Deque[ReferenceEntry]]] = defaultdict(dict)
     min_t: Optional[int] = None
     max_t: Optional[int] = None
 
     while reader.has_next():
-        topic_name, _, t = reader.read_next()
-        timestamps[topic_name].append(t)
+        topic_name, data, t = reader.read_next()
+        msg_cls = get_message(type_map[topic_name])
+        msg = deserialize_message(data, msg_cls)
+        if hasattr(msg, 'header') and msg.header.stamp:
+            stamp_ns = msg.header.stamp.sec * NSEC_PER_SEC + msg.header.stamp.nanosec
+            ref_entry = ReferenceEntry(storage_stamp=t, header_stamp=stamp_ns)
+            entries[topic_name].append(ref_entry)
+            topic_map = header_lookup[topic_name]
+            if stamp_ns not in topic_map:
+                topic_map[stamp_ns] = deque()
+            topic_map[stamp_ns].append(ref_entry)
+        else:
+            entries[topic_name].append(ReferenceEntry(storage_stamp=t, header_stamp=None))
         if min_t is None or t < min_t:
             min_t = t
         if max_t is None or t > max_t:
             max_t = t
 
-    return timestamps, min_t, max_t
+    return entries, header_lookup, min_t, max_t
 
 
 def compute_header_bounds(
@@ -138,6 +169,20 @@ def main() -> int:
     storage_id = args.storage
     ref_storage_id = args.reference_storage or storage_id
 
+    sync_pairs: Dict[str, str] = {}
+    if args.sync_pair:
+        for item in args.sync_pair:
+            if ':' not in item:
+                print(f'--sync-pair の形式が不正です: {item}', file=sys.stderr)
+                return 1
+            primary, secondary = item.split(':', 1)
+            primary = primary.strip()
+            secondary = secondary.strip()
+            if not primary or not secondary:
+                print(f'--sync-pair の形式が不正です: {item}', file=sys.stderr)
+                return 1
+            sync_pairs[secondary] = primary
+
     if not Path(in_uri).exists():
         print(f'入力ディレクトリが見つかりません: {in_uri}', file=sys.stderr)
         return 1
@@ -159,11 +204,14 @@ def main() -> int:
         rclpy.shutdown()
         return 1
 
-    reference_timestamps: Optional[Dict[str, List[int]]] = None
+    reference_entries: Optional[Dict[str, List[ReferenceEntry]]] = None
+    reference_header_lookup: Optional[Dict[str, Dict[int, Deque[ReferenceEntry]]]] = None
     ref_min: Optional[int] = None
     ref_max: Optional[int] = None
     if ref_uri:
-        reference_timestamps, ref_min, ref_max = load_reference_timestamps(ref_uri, ref_storage_id)
+        reference_entries, reference_header_lookup, ref_min, ref_max = load_reference_data(
+            ref_uri, ref_storage_id
+        )
         if ref_min is None or ref_max is None:
             print('参照 bag にメッセージが存在しませんでした。', file=sys.stderr)
             rclpy.shutdown()
@@ -195,6 +243,7 @@ def main() -> int:
 
     last_timestamp_ns = -1
     topic_indices: Dict[str, int] = defaultdict(int)
+    exhausted_topics: Set[str] = set()
 
     try:
         while reader.has_next():
@@ -202,16 +251,80 @@ def main() -> int:
             msg_cls = get_message(type_map[topic_name])
             msg = deserialize_message(data, msg_cls)
 
-            ref_list = reference_timestamps.get(topic_name) if reference_timestamps else None
+            ref_sequence = reference_entries.get(topic_name) if reference_entries else None
             ref_idx = topic_indices[topic_name]
 
-            if ref_list and ref_idx < len(ref_list):
-                new_t = ref_list[ref_idx]
-                if args.rewrite_header and hasattr(msg, 'header'):
-                    msg.header.stamp.sec = int(new_t // NSEC_PER_SEC)
-                    msg.header.stamp.nanosec = int(new_t % NSEC_PER_SEC)
-            elif hasattr(msg, 'header') and msg.header.stamp:
-                original_stamp = msg.header.stamp.sec * NSEC_PER_SEC + msg.header.stamp.nanosec
+            header_stamp_ns: Optional[int] = None
+            if hasattr(msg, 'header') and msg.header.stamp:
+                header_stamp_ns = msg.header.stamp.sec * NSEC_PER_SEC + msg.header.stamp.nanosec
+
+            new_t: Optional[int] = None
+            header_override: Optional[int] = None
+
+            # ヘッダ値が一致する参照エントリがあれば優先して利用
+            if (
+                header_stamp_ns is not None
+                and reference_header_lookup
+                and topic_name in reference_header_lookup
+            ):
+                topic_map = reference_header_lookup[topic_name]
+                queue = topic_map.get(header_stamp_ns)
+                if queue:
+                    ref_entry = queue.popleft()
+                    if not queue:
+                        del topic_map[header_stamp_ns]
+                    new_t = ref_entry.storage_stamp
+                    header_override = ref_entry.header_stamp
+
+            if new_t is None and ref_sequence:
+                if ref_idx < len(ref_sequence):
+                    ref_entry = ref_sequence[ref_idx]
+                    new_t = ref_entry.storage_stamp
+                    header_override = ref_entry.header_stamp
+                elif topic_name not in exhausted_topics:
+                    print(
+                        f'警告: 参照 bag のメッセージ数が不足しているため {topic_name} のタイムスタンプをコピーできません。',
+                        file=sys.stderr,
+                    )
+                    exhausted_topics.add(topic_name)
+            # 同期対象になっている場合、PRIMARY の参照時刻で上書き
+            primary_topic = sync_pairs.get(topic_name)
+            if primary_topic and reference_entries:
+                if (
+                    header_stamp_ns is not None
+                    and reference_header_lookup
+                    and primary_topic in reference_header_lookup
+                ):
+                    primary_map = reference_header_lookup[primary_topic]
+                    queue = primary_map.get(header_stamp_ns)
+                    if queue:
+                        ref_entry = queue[0]  # don't pop to allow reuse for primary topic itself
+                        new_t = ref_entry.storage_stamp
+                        header_override = ref_entry.header_stamp
+                if new_t is None:
+                    primary_seq = reference_entries.get(primary_topic)
+                    if primary_seq and ref_idx < len(primary_seq):
+                        ref_entry = primary_seq[ref_idx]
+                        new_t = ref_entry.storage_stamp
+                        header_override = ref_entry.header_stamp
+                    elif topic_name not in exhausted_topics:
+                        print(
+                            f'警告: {primary_topic} と {topic_name} のメッセージ数が一致しません（インデックス {ref_idx}）。',
+                            file=sys.stderr,
+                        )
+                        exhausted_topics.add(topic_name)
+                    ref_entry = primary_seq[ref_idx]
+                    new_t = ref_entry.storage_stamp
+                    header_override = ref_entry.header_stamp
+                elif topic_name not in exhausted_topics:
+                    print(
+                        f'警告: {primary_topic} と {topic_name} のメッセージ数が一致しません（インデックス {ref_idx}）。',
+                        file=sys.stderr,
+                    )
+                    exhausted_topics.add(topic_name)
+
+            if new_t is None and header_stamp_ns is not None:
+                original_stamp = header_stamp_ns
                 if header_max == header_min:
                     new_t = ref_min
                 elif original_stamp == header_max:
@@ -220,18 +333,19 @@ def main() -> int:
                     delta = original_stamp - header_min
                     new_t = ref_min + (delta * scale_num) // scale_den
 
-                if args.rewrite_header:
-                    msg.header.stamp.sec = int(new_t // NSEC_PER_SEC)
-                    msg.header.stamp.nanosec = int(new_t % NSEC_PER_SEC)
-            else:
-                # ヘッダが無い場合は元の記録時刻を使用
+            if new_t is None:
+                # ヘッダが無い場合や参照が取れない場合は元の記録時刻を使用
                 new_t = t
 
-            if args.ensure_monotonic and new_t <= last_timestamp_ns:
-                new_t = last_timestamp_ns + 1
-                if args.rewrite_header and hasattr(msg, 'header') and msg.header.stamp:
-                    msg.header.stamp.sec = int(new_t // NSEC_PER_SEC)
-                    msg.header.stamp.nanosec = int(new_t % NSEC_PER_SEC)
+            if args.rewrite_header and hasattr(msg, 'header'):
+                if header_override is not None:
+                    header_value = header_override
+                elif header_stamp_ns is not None:
+                    header_value = header_stamp_ns
+                else:
+                    header_value = new_t
+                msg.header.stamp.sec = int(header_value // NSEC_PER_SEC)
+                msg.header.stamp.nanosec = int(header_value % NSEC_PER_SEC)
 
             writer.write(topic_name, serialize_message(msg), new_t)
             last_timestamp_ns = max(last_timestamp_ns, new_t)

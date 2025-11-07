@@ -139,7 +139,7 @@ class MirrorPlaneMapper(Node):
         self.declare_parameter("marker_scale", [0.1, 0.1, 0.01])
         self.declare_parameter("publish_period_sec", 0.5)
         self.declare_parameter("publish_markers", True)
-        self.declare_parameter("use_clustering", False)
+        self.declare_parameter("use_clustering", True)
         self.declare_parameter("dp_lambda", 0.10)  # [m] DP-planes のクラスタ生成閾値
         self.declare_parameter("cluster_stale_time_sec", 0.0)
         self.declare_parameter("cluster_min_support", 3)

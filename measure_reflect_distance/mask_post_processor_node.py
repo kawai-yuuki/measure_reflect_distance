@@ -103,7 +103,12 @@ class MaskPostProcessingNode(Node):
         # The mask from the network should already be binary, but we re-binarize it
         # to guard against interpolation artifacts or scaling to 255.
         _, binary = cv2.threshold(resized, 127, 255, cv2.THRESH_BINARY)
-        return binary
+
+        # Closing helps fill small holes / smooth jagged edges from segmentation output.
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        closed = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
+
+        return closed
 
 
 def main(args=None) -> None:
