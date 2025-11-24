@@ -32,11 +32,11 @@ def generate_launch_description():
             # "colorizer.enable": 'true',
 
             # ▼ 露出固定（深度/IR）
-            'depth_module.enable_auto_exposure': 'false',
-            'depth_module.exposure': '8500',     # μs: 環境で調整
-            'depth_module.gain': '16',
-            'depth_module.emitter_enabled': '1', # 0:off, 1:on, 2:toggle系
-            'depth_module.laser_power': '150',
+            # 'depth_module.enable_auto_exposure': 'false',
+            # 'depth_module.exposure': '8500',     # μs: 環境で調整
+            # 'depth_module.gain': '16',
+            # 'depth_module.emitter_enabled': '1', # 0:off, 1:on, 2:toggle系
+            # 'depth_module.laser_power': '150',
 
             # High Accuracy相当（任意）
             # ドライバ実装では preset の整数値:
@@ -44,11 +44,11 @@ def generate_launch_description():
             'depth_module.visual_preset': '3',
 
             # ▼ 露出固定（カラー）
-            'rgb_camera.enable_auto_exposure': 'false',
-            'rgb_camera.exposure': '128',       # μs
-            'rgb_camera.gain': '70',
-            'rgb_camera.enable_auto_white_balance': 'false',
-            'rgb_camera.auto_exposure_priority': 'false',
+            # 'rgb_camera.enable_auto_exposure': 'false',
+            # 'rgb_camera.exposure': '128',       # μs
+            # 'rgb_camera.gain': '70',
+            # 'rgb_camera.enable_auto_white_balance': 'false',
+            # 'rgb_camera.auto_exposure_priority': 'false',
 
             # フィルタ
             # "hole_filling_filter.enable": 'true',
