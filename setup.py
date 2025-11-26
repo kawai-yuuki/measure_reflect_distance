@@ -34,6 +34,7 @@ setup(
             'mirror_plane_mapper = measure_reflect_distance.mirror_plane_mapper:main',
             'tct_calibrator = measure_reflect_distance.tct_calibrator:main',
             'tag_real_static_broadcaster = measure_reflect_distance.tag_real_static_broadcaster:main',
+            'tag_plane_marker_node = measure_reflect_distance.tag_plane_marker_node:main',
         ],
     },
 )
