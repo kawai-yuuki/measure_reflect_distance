@@ -35,6 +35,9 @@ setup(
             'tct_calibrator = measure_reflect_distance.tct_calibrator:main',
             'tag_real_static_broadcaster = measure_reflect_distance.tag_real_static_broadcaster:main',
             'tag_plane_marker_node = measure_reflect_distance.tag_plane_marker_node:main',
+            'apriltag_overlay_node = measure_reflect_distance.apriltag_overlay_node:main',
+            'mirror_surface_marker_node = measure_reflect_distance.mirror_surface_marker_node:main',
+            'wall_plane_marker_node = measure_reflect_distance.wall_plane_marker_node:main',
         ],
     },
 )
