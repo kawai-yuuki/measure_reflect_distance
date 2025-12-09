@@ -1,6 +1,6 @@
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import LaunchConfiguration, TextSubstitution
+from launch.substitutions import EnvironmentVariable, LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -14,6 +14,12 @@ def generate_launch_description():
     processed_mask_topic = LaunchConfiguration("processed_mask_topic")
     sync_queue_size = LaunchConfiguration("sync_queue_size")
     sync_slop = LaunchConfiguration("sync_slop")
+    model_path = LaunchConfiguration("model_path")
+    profile_enabled = LaunchConfiguration("profile_enabled")
+    profile_interval = LaunchConfiguration("profile_interval")
+    torch_num_threads = LaunchConfiguration("torch_num_threads")
+    torch_num_interop_threads = LaunchConfiguration("torch_num_interop_threads")
+    opencv_num_threads = LaunchConfiguration("opencv_num_threads")
 
     return LaunchDescription(
         [
@@ -29,12 +35,12 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "relay_max_fps",
-                default_value=TextSubstitution(text="15.0"),
+                default_value=TextSubstitution(text="0.0"),
                 description="Maximum frequency (Hz) for the relay node output.",
             ),
             DeclareLaunchArgument(
                 "unet_max_fps",
-                default_value=TextSubstitution(text="15.0"),
+                default_value=TextSubstitution(text="0.0"),
                 description="Optional additional throttling inside the UNet node (0 disables).",
             ),
             DeclareLaunchArgument(
@@ -56,6 +62,40 @@ def generate_launch_description():
                 "sync_slop",
                 default_value=TextSubstitution(text="0.05"),
                 description="Allowed timestamp delta (seconds) for synchronized RGB and mask frames.",
+            ),
+            DeclareLaunchArgument(
+                "model_path",
+                default_value=[
+                    TextSubstitution(text="/media/"),
+                    EnvironmentVariable("USER"),
+                    TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt"),
+                ],
+                description="Path to the UNet weight file; defaults to the KIOXIA drive mounted under /media/<user>/KIOXIA.",
+            ),
+            DeclareLaunchArgument(
+                "profile_enabled",
+                default_value=TextSubstitution(text="false"),
+                description="Enable per-frame profiling logs inside the UNet node.",
+            ),
+            DeclareLaunchArgument(
+                "profile_interval",
+                default_value=TextSubstitution(text="30"),
+                description="How many processed frames between profiling log lines.",
+            ),
+            DeclareLaunchArgument(
+                "torch_num_threads",
+                default_value=TextSubstitution(text="2"),
+                description="Number of intra-op PyTorch threads (torch.set_num_threads).",
+            ),
+            DeclareLaunchArgument(
+                "torch_num_interop_threads",
+                default_value=TextSubstitution(text="2"),
+                description="Number of inter-op PyTorch threads (torch.set_num_interop_threads).",
+            ),
+            DeclareLaunchArgument(
+                "opencv_num_threads",
+                default_value=TextSubstitution(text="1"),
+                description="Number of OpenCV threads (cv2.setNumThreads).",
             ),
             Node(
                 package="measure_reflect_distance",
@@ -80,6 +120,14 @@ def generate_launch_description():
                         "image_topic": relay_rgb_topic,
                         "mask_topic": raw_mask_topic,
                         "max_fps": ParameterValue(unet_max_fps, value_type=float),
+                        "model_path": model_path,
+                        "profile_enabled": profile_enabled,
+                        "profile_interval": ParameterValue(profile_interval, value_type=int),
+                        "torch_num_threads": ParameterValue(torch_num_threads, value_type=int),
+                        "torch_num_interop_threads": ParameterValue(
+                            torch_num_interop_threads, value_type=int
+                        ),
+                        "opencv_num_threads": ParameterValue(opencv_num_threads, value_type=int),
                     }
                 ],
             ),

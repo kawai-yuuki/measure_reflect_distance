@@ -32,8 +32,8 @@ def generate_launch_description() -> LaunchDescription:
             # "--Rtabmap/MaxRetrieved 0 "
             "--RGBD/CreateOccupancyGrid  true "
             "--Grid/CellSize 0.05 "
-            "--Vis/InlierDistance 0.05 "
-            "--Icp/MaxCorrespondenceDistance 0.07 "
+            # "--Vis/InlierDistance 0.05 "
+            # "--Icp/MaxCorrespondenceDistance 0.07 "
             "--Vis/MinInliers 30 "
             "--Icp/Iterations 30 "
         ),

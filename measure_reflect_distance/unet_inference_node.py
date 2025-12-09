@@ -22,11 +22,30 @@ class UNetInferenceNode(Node):
         self.declare_parameter("image_topic", "/camera/unet/image_raw")
         self.declare_parameter("mask_topic", "/mask_image")
         self.declare_parameter("max_fps", 15.0)
+        username = os.environ.get("USER") or os.path.basename(os.path.expanduser("~"))
+        default_model_path = os.path.join(
+            "/media",
+            username,
+            "KIOXIA",
+            "segmentation_model",
+            "mirror",
+            "saved_model",
+            "original_dataset",
+            "best.pt",
+        )
+        self.declare_parameter("model_path", default_model_path)
 
         self.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.model = UNet(n_channels=3, n_classes=1, bilinear=True)
-        # モデルへの絶対パスを生成
-        model_path = '/media/yuukikawai-ubuntu22/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt'
+        model_path = (
+            self.get_parameter("model_path").get_parameter_value().string_value
+        )
+        if not os.path.isfile(model_path):
+            raise FileNotFoundError(
+                f"UNet weight file not found at: {model_path}. "
+                "Set the 'model_path' parameter to the correct location."
+            )
+        self.get_logger().info(f"Loading UNet weights from {model_path}")
 
         state_dict = torch.load(model_path, map_location=self.device, weights_only=True)
         self.model.load_state_dict(state_dict)
