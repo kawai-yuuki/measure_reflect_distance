@@ -143,6 +143,8 @@ class MirrorPlaneMapper(Node):
         self.declare_parameter("dp_lambda", 0.10)  # [m] DP-planes のクラスタ生成閾値
         self.declare_parameter("cluster_stale_time_sec", 0.0)
         self.declare_parameter("cluster_min_support", 3)
+        self.declare_parameter("cluster_plane_topic", "mirror_plane_clustered")
+        self.declare_parameter("cluster_observation_topic", "mirror_plane_clustered_observation")
 
         plane_topic = self.get_parameter("plane_topic").get_parameter_value().string_value
         self.frame_id = self.get_parameter("frame_id").get_parameter_value().string_value
@@ -157,6 +159,12 @@ class MirrorPlaneMapper(Node):
         self.dp_lambda = max(0.0, float(self.get_parameter("dp_lambda").value))
         self.cluster_stale_time = max(0.0, float(self.get_parameter("cluster_stale_time_sec").value))
         self.cluster_min_support = max(1, int(self.get_parameter("cluster_min_support").value))
+        self.cluster_plane_topic = (
+            self.get_parameter("cluster_plane_topic").get_parameter_value().string_value
+        )
+        self.cluster_observation_topic = (
+            self.get_parameter("cluster_observation_topic").get_parameter_value().string_value
+        )
 
         # --- 状態 ---
         self._clusters: Dict[int, PlaneCluster] = {}
@@ -168,6 +176,10 @@ class MirrorPlaneMapper(Node):
         # --- ROS I/O ---
         self.create_subscription(Float64MultiArray, plane_topic, self._plane_callback, 10)
         self.marker_pub = self.create_publisher(MarkerArray, self.marker_topic, 10)
+        self.cluster_plane_pub = self.create_publisher(Float64MultiArray, self.cluster_plane_topic, 10)
+        self.cluster_observation_pub = self.create_publisher(
+            Float64MultiArray, self.cluster_observation_topic, 10
+        )
         if self.publish_markers:
             self.timer = self.create_timer(publish_period, self._publish_markers)
             if self.use_clustering:
@@ -250,6 +262,7 @@ class MirrorPlaneMapper(Node):
             return
 
         best_cluster.merge(point, normal, tangent, stamp_sec)
+        self._publish_cluster_observation(best_cluster, point, normal, tangent, stamp_sec)
 
     def _create_cluster(self, point: np.ndarray, normal: np.ndarray,
                         tangent: np.ndarray, stamp_sec: float) -> None:
@@ -268,6 +281,58 @@ class MirrorPlaneMapper(Node):
             last_update=stamp_sec,
         )
         self.get_logger().info(f"[mirror_plane_mapper] new cluster #{cluster_id} created (count=1)")
+        self._publish_cluster_observation(self._clusters[cluster_id], point, normal, tangent, stamp_sec)
+
+    def _publish_cluster_observation(
+        self, cluster: PlaneCluster, point: np.ndarray, normal: np.ndarray, tangent: np.ndarray, stamp_sec: float
+    ) -> None:
+        if not self.cluster_observation_pub:
+            return
+        tangent = tangent - float(tangent @ normal) * normal
+        tangent = _safe_normalize(tangent)
+        distance = -float(normal @ point)
+        msg = Float64MultiArray()
+        msg.data = [
+            float(cluster.cluster_id),
+            float(normal[0]),
+            float(normal[1]),
+            float(normal[2]),
+            distance,
+            float(point[0]),
+            float(point[1]),
+            float(point[2]),
+            float(tangent[0]),
+            float(tangent[1]),
+            float(tangent[2]),
+            float(cluster.count),
+            float(stamp_sec),
+        ]
+        self.cluster_observation_pub.publish(msg)
+
+    def _publish_cluster_plane(
+        self, cluster: PlaneCluster, normal: np.ndarray, point: np.ndarray, tangent: np.ndarray
+    ) -> None:
+        if not self.cluster_plane_pub:
+            return
+        tangent = tangent - float(tangent @ normal) * normal
+        tangent = _safe_normalize(tangent)
+        distance = -float(normal @ point)
+        msg = Float64MultiArray()
+        msg.data = [
+            float(cluster.cluster_id),
+            float(normal[0]),
+            float(normal[1]),
+            float(normal[2]),
+            distance,
+            float(point[0]),
+            float(point[1]),
+            float(point[2]),
+            float(tangent[0]),
+            float(tangent[1]),
+            float(tangent[2]),
+            float(cluster.count),
+        ]
+        self.cluster_plane_pub.publish(msg)
 
     # --- Marker 出力 ---
 
@@ -319,6 +384,7 @@ class MirrorPlaneMapper(Node):
 
                 markers.markers.append(marker)
                 current_ids.add(cluster.cluster_id)
+                self._publish_cluster_plane(cluster, normal, point, tangent)
         else:
             for obs in self._observations.values():
                 basis = _build_basis(obs.normal, obs.tangent)
