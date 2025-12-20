@@ -29,6 +29,7 @@ def generate_launch_description() -> LaunchDescription:
     camera_info = LaunchConfiguration("camera_info_topic")
     camera_frame = LaunchConfiguration("camera_frame")
     tag_cfg = LaunchConfiguration("tag_config_path")
+    use_sim_time = LaunchConfiguration("use_sim_time")
 
     default_tag_cfg = _default_tag_cfg()
 
@@ -43,6 +44,7 @@ def generate_launch_description() -> LaunchDescription:
             _declare("wall_marker_topic", "/wall_plane_markers", "Marker topic for wall"),
             _declare("overlay_topic", "/apriltag_overlay/image", "Output image topic for overlay"),
             _declare("plane_size_m", "1.0", "Wall plane patch size (edge length, meters)"),
+            _declare("use_sim_time", "true", "Use simulated time"),
         ]
         + [
             Node(
@@ -58,6 +60,7 @@ def generate_launch_description() -> LaunchDescription:
                         "camera_frame": camera_frame,
                         "tag_config_path": tag_cfg,
                         "output_image_topic": LaunchConfiguration("overlay_topic"),
+                        "use_sim_time": use_sim_time,
                     }
                 ],
             ),
@@ -72,6 +75,7 @@ def generate_launch_description() -> LaunchDescription:
                         "camera_frame": camera_frame,
                         "tag_config_path": tag_cfg,
                         "marker_topic": LaunchConfiguration("mirror_marker_topic"),
+                        "use_sim_time": use_sim_time,
                     }
                 ],
             ),
@@ -87,6 +91,7 @@ def generate_launch_description() -> LaunchDescription:
                         "tag_config_path": tag_cfg,
                         "marker_topic": LaunchConfiguration("wall_marker_topic"),
                         "plane_size_m": LaunchConfiguration("plane_size_m"),
+                        "use_sim_time": use_sim_time,
                     }
                 ],
             ),
