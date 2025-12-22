@@ -39,6 +39,7 @@ setup(
             'apriltag_overlay_node = measure_reflect_distance.apriltag_overlay_node:main',
             'mirror_surface_marker_node = measure_reflect_distance.mirror_surface_marker_node:main',
             'wall_plane_marker_node = measure_reflect_distance.wall_plane_marker_node:main',
+            'pipeline_metrics_logger_node = measure_reflect_distance.pipeline_metrics_logger_node:main',
         ],
     },
 )

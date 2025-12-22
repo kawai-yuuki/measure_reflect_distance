@@ -8,6 +8,8 @@ import torchvision.transforms as T
 import cv2
 import numpy as np
 import os
+import time
+from std_msgs.msg import Float32
 
 from measure_reflect_distance.util.unet_model import UNet
  
@@ -22,6 +24,9 @@ class UNetInferenceNode(Node):
         self.declare_parameter("image_topic", "/camera/unet/image_raw")
         self.declare_parameter("mask_topic", "/mask_image")
         self.declare_parameter("max_fps", 15.0)
+        self.declare_parameter("profile_enabled", False)
+        self.declare_parameter("profile_interval", 30)
+        self.declare_parameter("inference_time_topic", "/unet/inference_time_ms")
         username = os.environ.get("USER") or os.path.basename(os.path.expanduser("~"))
         default_model_path = os.path.join(
             "/media",
@@ -65,6 +70,26 @@ class UNetInferenceNode(Node):
         image_topic = self.get_parameter("image_topic").get_parameter_value().string_value
         mask_topic = self.get_parameter("mask_topic").get_parameter_value().string_value
 
+        profile_enabled = self.get_parameter("profile_enabled").value
+        if isinstance(profile_enabled, str):
+            profile_enabled = profile_enabled.strip().lower() in ("1", "true", "yes", "on")
+        self.profile_enabled = bool(profile_enabled)
+        profile_interval = self.get_parameter("profile_interval").value
+        try:
+            self.profile_interval = int(profile_interval)
+        except (TypeError, ValueError):
+            self.profile_interval = 30
+        self.profile_interval = max(self.profile_interval, 1)
+        self.inference_time_topic = (
+            self.get_parameter("inference_time_topic").get_parameter_value().string_value
+        )
+        self._profile_frame_count = 0
+        self._inference_time_pub = None
+        if self.profile_enabled and self.inference_time_topic:
+            self._inference_time_pub = self.create_publisher(
+                Float32, self.inference_time_topic, 10
+            )
+
         self.subscription = self.create_subscription(
             Image,
             image_topic,
@@ -91,7 +116,8 @@ class UNetInferenceNode(Node):
 
         self.get_logger().info(
             f"UNet Inference Node has been started (image_topic={image_topic}, "
-            f"mask_topic={mask_topic}, max_fps={self.max_fps:.2f})"
+            f"mask_topic={mask_topic}, max_fps={self.max_fps:.2f}, "
+            f"profile_enabled={self.profile_enabled})"
         )
 
     def log_fps(self):
@@ -130,8 +156,20 @@ class UNetInferenceNode(Node):
             input_tensor = self.preprocess(rgb_image).unsqueeze(0).to(self.device)
 
             # 推論
+            if self.profile_enabled and self.device.type == "cuda":
+                torch.cuda.synchronize()
+            infer_start = time.perf_counter() if self.profile_enabled else None
             with torch.no_grad():
                 output = self.model(input_tensor)
+            if self.profile_enabled:
+                if self.device.type == "cuda":
+                    torch.cuda.synchronize()
+                infer_ms = (time.perf_counter() - infer_start) * 1000.0
+                if self._inference_time_pub is not None:
+                    self._inference_time_pub.publish(Float32(data=float(infer_ms)))
+                self._profile_frame_count += 1
+                if self._profile_frame_count % self.profile_interval == 0:
+                    self.get_logger().info(f"Inference time: {infer_ms:.2f} ms")
             
             # min_val = output.min().item()
             # max_val = output.max().item()

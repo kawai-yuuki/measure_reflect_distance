@@ -74,7 +74,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "profile_enabled",
-                default_value=TextSubstitution(text="false"),
+                default_value=TextSubstitution(text="true"),
                 description="Enable per-frame profiling logs inside the UNet node.",
             ),
             DeclareLaunchArgument(
