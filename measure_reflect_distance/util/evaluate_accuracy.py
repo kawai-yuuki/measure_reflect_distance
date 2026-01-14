@@ -20,11 +20,19 @@ class AccuracyEvaluator(Node):
         self.declare_parameter('gt_tag_frame_prefix', 'landmark_') 
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.declare_parameter('output_csv', 'evaluation_result.csv')
+        self.declare_parameter('mirror_side_length_m', 0.6)
 
         self.gt_ids = self.get_parameter('gt_tag_ids').value
         self.prefix = self.get_parameter('gt_tag_frame_prefix').value
         self.cam_frame = self.get_parameter('camera_frame').value
         self.csv_path = self.get_parameter('output_csv').value
+        self.mirror_side = float(self.get_parameter('mirror_side_length_m').value)
+        self.use_known_geometry = len(self.gt_ids) <= 2
+        if self.use_known_geometry and not set(self.gt_ids).issubset({1, 2}):
+            self.get_logger().warning(
+                "Known-geometry mode only supports tag IDs 1 and 2; falling back to averaging visible tags."
+            )
+            self.use_known_geometry = False
 
         # --- TF & Sub ---
         self.tf_buffer = Buffer()
@@ -39,19 +47,43 @@ class AccuracyEvaluator(Node):
         )
 
         # CSVの準備（ヘッダー書き込み）
-        if not os.path.exists(self.csv_path):
+        self.write_signed = True
+        csv_needs_header = (not os.path.exists(self.csv_path)) or os.path.getsize(self.csv_path) == 0
+        if csv_needs_header:
             with open(self.csv_path, 'w') as f:
                 writer = csv.writer(f)
                 writer.writerow([
-                    'timestamp', 
-                    'dist_error_mm', 
-                    'angle_error_deg', 
-                    'est_dist_param_m', 
+                    'timestamp',
+                    'dist_error_mm',
+                    'dist_error_signed_mm',
+                    'angle_error_deg',
+                    'est_dist_param_m',
                     'gt_center_dist_m',
                     'visible_gt_tags' # そのフレームで計算に使えた真値タグの数
                 ])
+        else:
+            try:
+                with open(self.csv_path, 'r') as f:
+                    reader = csv.reader(f)
+                    header = next(reader, None)
+                if not header or 'dist_error_signed_mm' not in header:
+                    self.write_signed = False
+                    self.get_logger().warning(
+                        "Existing CSV has no dist_error_signed_mm column; signed error will not be logged. "
+                        "Use a new output_csv to enable signed logging."
+                    )
+            except Exception:
+                self.write_signed = False
+                self.get_logger().warning(
+                    "Failed to read CSV header; signed error will not be logged. "
+                    "Use a new output_csv to enable signed logging."
+                )
         
         self.get_logger().info(f"Evaluation started for Tags {self.gt_ids}. Saving to {self.csv_path}")
+        if self.use_known_geometry:
+            self.get_logger().info(
+                f"Using known mirror geometry (side={self.mirror_side:.3f}m) for GT center."
+            )
 
     def callback(self, msg):
         # 1. 推定平面の取得 [nx, ny, nz, d]
@@ -61,6 +93,7 @@ class AccuracyEvaluator(Node):
         # 2. 真値（GT）の取得 (TFからタグ位置を引く)
         gt_points = []
         gt_normals = []
+        gt_tag_data = {}
         visible_count = 0
         
         for tid in self.gt_ids:
@@ -87,6 +120,7 @@ class AccuracyEvaluator(Node):
                 R = self.quat_to_rot(q)
                 normal = R[:, 2] # Z axis
                 gt_normals.append(normal)
+                gt_tag_data[tid] = {"p": p, "R": R}
                 visible_count += 1
 
             except TransformException:
@@ -97,15 +131,27 @@ class AccuracyEvaluator(Node):
             return 
 
         # 真値の中心と法線（見えているタグの平均）
-        # 4隅の平均を取ることで、鏡の中心座標が得られる
-        p_gt_center = np.mean(gt_points, axis=0)
         n_gt_mean = np.mean(gt_normals, axis=0)
-        n_gt_mean /= np.linalg.norm(n_gt_mean)
+        n_gt_norm = np.linalg.norm(n_gt_mean)
+        if n_gt_norm == 0.0:
+            return
+        n_gt_mean /= n_gt_norm
+
+        if self.use_known_geometry:
+            p_gt_center = self.compute_center_from_known_geometry(gt_tag_data, n_gt_mean)
+            if p_gt_center is None:
+                return
+        else:
+            # 4隅の平均を取ることで、鏡の中心座標が得られる
+            p_gt_center = np.mean(gt_points, axis=0)
 
         # 3. 誤差計算
         # 距離誤差 (点と平面の距離): | n_est * p_gt + d_est |
         # 推定された無限平面が、真値の中心点からどれだけ離れているか
-        dist_error_m = abs(np.dot(n_est, p_gt_center) + d_est)
+        signed_error_m = np.dot(n_est, p_gt_center) + d_est
+        if np.dot(n_est, n_gt_mean) < 0.0:
+            signed_error_m *= -1.0
+        dist_error_m = abs(signed_error_m)
         
         # 角度誤差: acos(|n_est * n_gt|)
         dot = np.clip(np.dot(n_est, n_gt_mean), -1.0, 1.0)
@@ -118,18 +164,64 @@ class AccuracyEvaluator(Node):
         # 4. 保存
         with open(self.csv_path, 'a') as f:
             writer = csv.writer(f)
-            writer.writerow([
+            row = [
                 self.get_clock().now().nanoseconds,
                 dist_error_m * 1000.0, # mm変換
+            ]
+            if self.write_signed:
+                row.append(signed_error_m * 1000.0)
+            row.extend([
                 angle_error_deg,
-                d_est, 
+                d_est,
                 gt_dist_from_cam,
                 visible_count
             ])
+            writer.writerow(row)
             
         self.get_logger().info(
             f"Logged: DistErr={dist_error_m*1000:.1f}mm, AngErr={angle_error_deg:.1f}deg (GT tags: {visible_count})"
         )
+
+    def compute_center_from_known_geometry(self, tag_data, n_gt_mean):
+        half = self.mirror_side * 0.5
+        centers = []
+
+        # Two-tag geometry: use the right edge (id1 upper right, id2 lower right).
+        if 1 in tag_data and 2 in tag_data:
+            p1 = tag_data[1]["p"]
+            p2 = tag_data[2]["p"]
+            up_dir = p1 - p2
+            up_norm = np.linalg.norm(up_dir)
+            if up_norm > 1e-9:
+                up_dir /= up_norm
+                right_dir = np.cross(up_dir, n_gt_mean)
+                right_norm = np.linalg.norm(right_dir)
+                if right_norm > 1e-9:
+                    right_dir /= right_norm
+                    avg_right = tag_data[1]["R"][:, 0] + tag_data[2]["R"][:, 0]
+                    avg_right_norm = np.linalg.norm(avg_right)
+                    if avg_right_norm > 1e-9 and np.dot(right_dir, avg_right) < 0.0:
+                        right_dir *= -1.0
+                    right_edge_mid = (p1 + p2) * 0.5
+                    centers.append(right_edge_mid - right_dir * half)
+
+        # Fallback: single-tag geometry using tag axes (x: right, y: down, z: out).
+        if not centers:
+            for tid in (1, 2):
+                if tid not in tag_data:
+                    continue
+                p = tag_data[tid]["p"]
+                R = tag_data[tid]["R"]
+                right_dir = R[:, 0]
+                up_dir = -R[:, 1]
+                if tid == 1:
+                    centers.append(p - right_dir * half - up_dir * half)
+                else:
+                    centers.append(p - right_dir * half + up_dir * half)
+
+        if not centers:
+            return None
+        return np.mean(centers, axis=0)
 
     def quat_to_rot(self, q):
         x, y, z, w = q

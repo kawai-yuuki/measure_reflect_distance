@@ -53,6 +53,13 @@ def main():
             # 集計 (平均と標準偏差)
             dist_err_mean = df['dist_error_mm'].mean()
             dist_err_std = df['dist_error_mm'].std()
+            dist_err_signed_mean = None
+            dist_err_signed_std = None
+            if 'dist_error_signed_mm' in df.columns:
+                dist_err_signed_mean = df['dist_error_signed_mm'].mean()
+                dist_err_signed_std = df['dist_error_signed_mm'].std()
+            else:
+                print(f"Signed distance column missing: {os.path.basename(f)}")
             angle_err_mean = df['angle_error_deg'].mean()
             angle_err_std = df['angle_error_deg'].std()
 
@@ -61,6 +68,8 @@ def main():
                 'Distance': dist,
                 'DistErr_Mean': dist_err_mean,
                 'DistErr_Std': dist_err_std,
+                'DistErrSigned_Mean': dist_err_signed_mean,
+                'DistErrSigned_Std': dist_err_signed_std,
                 'AngleErr_Mean': angle_err_mean,
                 'AngleErr_Std': angle_err_std,
                 'Count': len(df)
@@ -130,6 +139,38 @@ def main():
     save_path_angle = os.path.join(output_dir, 'graph_angle_error.png')
     plt.savefig(save_path_angle, dpi=300)
     print(f"グラフ保存: {save_path_angle}")
+
+    # 3. 符号付き距離誤差グラフ
+    has_signed = (
+        'DistErrSigned_Mean' in df_summary.columns
+        and df_summary['DistErrSigned_Mean'].notna().any()
+    )
+    if has_signed:
+        plt.figure(figsize=(8, 6))
+        for i, angle in enumerate(angles):
+            subset = df_summary[
+                (df_summary['Angle'] == angle)
+                & (df_summary['DistErrSigned_Mean'].notna())
+            ]
+            if len(subset) == 0:
+                continue
+            color = colors[i % len(colors)]
+            plt.errorbar(subset['Distance'], subset['DistErrSigned_Mean'],
+                         yerr=subset['DistErrSigned_Std'], fmt='-^',
+                         label=f'{angle} deg', color=color, capsize=5)
+
+        plt.axhline(0.0, color='gray', linestyle='--', linewidth=1)
+        plt.title('Signed Distance Error of Mirror Plane Estimation')
+        plt.xlabel('Distance to Mirror [m]')
+        plt.ylabel('Signed Distance Error [mm]')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+
+        save_path_signed = os.path.join(output_dir, 'graph_dist_error_signed.png')
+        plt.savefig(save_path_signed, dpi=300)
+        print(f"グラフ保存: {save_path_signed}")
+    else:
+        print("Signed distance data not found; skipping signed distance graph.")
 
 if __name__ == '__main__':
     main()
