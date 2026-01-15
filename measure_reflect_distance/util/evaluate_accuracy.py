@@ -21,12 +21,21 @@ class AccuracyEvaluator(Node):
         self.declare_parameter('camera_frame', 'camera_color_optical_frame')
         self.declare_parameter('output_csv', 'evaluation_result.csv')
         self.declare_parameter('mirror_side_length_m', 0.6)
+        self.declare_parameter('signed_angle_axis', [0.0, -1.0, 0.0])
 
         self.gt_ids = self.get_parameter('gt_tag_ids').value
         self.prefix = self.get_parameter('gt_tag_frame_prefix').value
         self.cam_frame = self.get_parameter('camera_frame').value
         self.csv_path = self.get_parameter('output_csv').value
         self.mirror_side = float(self.get_parameter('mirror_side_length_m').value)
+        axis_param = self.get_parameter('signed_angle_axis').value
+        self.signed_angle_axis = np.array(axis_param, dtype=float)
+        if self.signed_angle_axis.shape != (3,) or np.linalg.norm(self.signed_angle_axis) < 1e-9:
+            self.get_logger().warning(
+                "signed_angle_axis must be a non-zero 3D vector; using default [0.0, -1.0, 0.0]."
+            )
+            self.signed_angle_axis = np.array([0.0, -1.0, 0.0], dtype=float)
+        self.signed_angle_axis /= np.linalg.norm(self.signed_angle_axis)
         self.use_known_geometry = len(self.gt_ids) <= 2
         if self.use_known_geometry and not set(self.gt_ids).issubset({1, 2}):
             self.get_logger().warning(
@@ -47,37 +56,60 @@ class AccuracyEvaluator(Node):
         )
 
         # CSVの準備（ヘッダー書き込み）
-        self.write_signed = True
+        default_header = [
+            'timestamp',
+            'dist_error_mm',
+            'dist_error_signed_mm',
+            'angle_error_deg',
+            'angle_error_signed_deg',
+            'est_dist_param_m',
+            'gt_center_dist_m',
+            'visible_gt_tags' # そのフレームで計算に使えた真値タグの数
+        ]
+        fallback_header = [
+            'timestamp',
+            'dist_error_mm',
+            'angle_error_deg',
+            'est_dist_param_m',
+            'gt_center_dist_m',
+            'visible_gt_tags'
+        ]
         csv_needs_header = (not os.path.exists(self.csv_path)) or os.path.getsize(self.csv_path) == 0
         if csv_needs_header:
+            self.csv_header = default_header
             with open(self.csv_path, 'w') as f:
                 writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp',
-                    'dist_error_mm',
-                    'dist_error_signed_mm',
-                    'angle_error_deg',
-                    'est_dist_param_m',
-                    'gt_center_dist_m',
-                    'visible_gt_tags' # そのフレームで計算に使えた真値タグの数
-                ])
+                writer.writerow(self.csv_header)
         else:
             try:
                 with open(self.csv_path, 'r') as f:
                     reader = csv.reader(f)
                     header = next(reader, None)
-                if not header or 'dist_error_signed_mm' not in header:
-                    self.write_signed = False
+                if header:
+                    self.csv_header = header
+                else:
+                    self.csv_header = fallback_header
                     self.get_logger().warning(
-                        "Existing CSV has no dist_error_signed_mm column; signed error will not be logged. "
+                        "Existing CSV has no header; falling back to unsigned logging. "
                         "Use a new output_csv to enable signed logging."
                     )
             except Exception:
-                self.write_signed = False
+                self.csv_header = fallback_header
                 self.get_logger().warning(
-                    "Failed to read CSV header; signed error will not be logged. "
+                    "Failed to read CSV header; falling back to unsigned logging. "
                     "Use a new output_csv to enable signed logging."
                 )
+        missing_signed = []
+        if 'dist_error_signed_mm' not in self.csv_header:
+            missing_signed.append('dist_error_signed_mm')
+        if 'angle_error_signed_deg' not in self.csv_header:
+            missing_signed.append('angle_error_signed_deg')
+        if missing_signed:
+            missing = ", ".join(missing_signed)
+            self.get_logger().warning(
+                f"Existing CSV has no {missing} column(s); signed error will not be logged. "
+                "Use a new output_csv to enable signed logging."
+            )
         
         self.get_logger().info(f"Evaluation started for Tags {self.gt_ids}. Saving to {self.csv_path}")
         if self.use_known_geometry:
@@ -149,14 +181,17 @@ class AccuracyEvaluator(Node):
         # 距離誤差 (点と平面の距離): | n_est * p_gt + d_est |
         # 推定された無限平面が、真値の中心点からどれだけ離れているか
         signed_error_m = np.dot(n_est, p_gt_center) + d_est
+        n_est_aligned = n_est
         if np.dot(n_est, n_gt_mean) < 0.0:
             signed_error_m *= -1.0
+            n_est_aligned = -n_est
         dist_error_m = abs(signed_error_m)
         
         # 角度誤差: acos(|n_est * n_gt|)
-        dot = np.clip(np.dot(n_est, n_gt_mean), -1.0, 1.0)
+        dot = np.clip(np.dot(n_est_aligned, n_gt_mean), -1.0, 1.0)
         angle_error_rad = math.acos(abs(dot)) # 裏向きも許容するためabs
         angle_error_deg = math.degrees(angle_error_rad)
+        signed_angle_deg = self.compute_signed_angle_deg(n_est_aligned, n_gt_mean)
 
         # 参考: カメラから鏡中心までの距離
         gt_dist_from_cam = np.linalg.norm(p_gt_center)
@@ -164,18 +199,17 @@ class AccuracyEvaluator(Node):
         # 4. 保存
         with open(self.csv_path, 'a') as f:
             writer = csv.writer(f)
-            row = [
-                self.get_clock().now().nanoseconds,
-                dist_error_m * 1000.0, # mm変換
-            ]
-            if self.write_signed:
-                row.append(signed_error_m * 1000.0)
-            row.extend([
-                angle_error_deg,
-                d_est,
-                gt_dist_from_cam,
-                visible_count
-            ])
+            row_values = {
+                'timestamp': self.get_clock().now().nanoseconds,
+                'dist_error_mm': dist_error_m * 1000.0, # mm変換
+                'dist_error_signed_mm': signed_error_m * 1000.0,
+                'angle_error_deg': angle_error_deg,
+                'angle_error_signed_deg': signed_angle_deg,
+                'est_dist_param_m': d_est,
+                'gt_center_dist_m': gt_dist_from_cam,
+                'visible_gt_tags': visible_count
+            }
+            row = [row_values.get(name, '') for name in self.csv_header]
             writer.writerow(row)
             
         self.get_logger().info(
@@ -222,6 +256,33 @@ class AccuracyEvaluator(Node):
         if not centers:
             return None
         return np.mean(centers, axis=0)
+
+    def compute_signed_angle_deg(self, n_est, n_gt_mean):
+        axis = self.signed_angle_axis
+        axis_norm = np.linalg.norm(axis)
+        if axis_norm < 1e-9:
+            return float('nan')
+        axis = axis / axis_norm
+
+        n_est_proj = n_est - axis * float(n_est @ axis)
+        n_gt_proj = n_gt_mean - axis * float(n_gt_mean @ axis)
+        n_est_norm = np.linalg.norm(n_est_proj)
+        n_gt_norm = np.linalg.norm(n_gt_proj)
+        if n_est_norm < 1e-9 or n_gt_norm < 1e-9:
+            return float('nan')
+
+        n_est_proj /= n_est_norm
+        n_gt_proj /= n_gt_norm
+
+        dot = np.clip(float(n_gt_proj @ n_est_proj), -1.0, 1.0)
+        cross = np.cross(n_gt_proj, n_est_proj)
+        angle_rad = math.atan2(np.linalg.norm(cross), dot)
+        sign = float(cross @ axis)
+        if abs(sign) < 1e-9:
+            sign = 1.0
+        else:
+            sign = 1.0 if sign > 0.0 else -1.0
+        return math.degrees(angle_rad) * sign
 
     def quat_to_rot(self, q):
         x, y, z, w = q

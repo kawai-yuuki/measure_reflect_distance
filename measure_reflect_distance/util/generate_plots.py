@@ -60,6 +60,13 @@ def main():
                 dist_err_signed_std = df['dist_error_signed_mm'].std()
             else:
                 print(f"Signed distance column missing: {os.path.basename(f)}")
+            angle_err_signed_mean = None
+            angle_err_signed_std = None
+            if 'angle_error_signed_deg' in df.columns:
+                angle_err_signed_mean = df['angle_error_signed_deg'].mean()
+                angle_err_signed_std = df['angle_error_signed_deg'].std()
+            else:
+                print(f"Signed angle column missing: {os.path.basename(f)}")
             angle_err_mean = df['angle_error_deg'].mean()
             angle_err_std = df['angle_error_deg'].std()
 
@@ -72,6 +79,8 @@ def main():
                 'DistErrSigned_Std': dist_err_signed_std,
                 'AngleErr_Mean': angle_err_mean,
                 'AngleErr_Std': angle_err_std,
+                'AngleErrSigned_Mean': angle_err_signed_mean,
+                'AngleErrSigned_Std': angle_err_signed_std,
                 'Count': len(df)
             })
             print(f"読み込み完了: {os.path.basename(f)} (N={len(df)})")
@@ -109,9 +118,9 @@ def main():
                      yerr=subset['DistErr_Std'], fmt='-o', 
                      label=f'{angle} deg', color=color, capsize=5)
 
-    plt.title('Accuracy of Mirror Plane Distance Estimation')
-    plt.xlabel('Distance to Mirror [m]')
-    plt.ylabel('Distance Error [mm]')
+    plt.title('Absolute Distance Error of Mirror Plane Estimation')
+    plt.xlabel('Nominal Distance to Mirror [m]')
+    plt.ylabel('Absolute Distance Error [mm]')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     # plt.ylim(0, 50) # 必要ならY軸の範囲を固定
@@ -129,9 +138,9 @@ def main():
                      yerr=subset['AngleErr_Std'], fmt='-s', 
                      label=f'{angle} deg', color=color, capsize=5)
 
-    plt.title('Accuracy of Mirror Normal Estimation')
-    plt.xlabel('Distance to Mirror [m]')
-    plt.ylabel('Normal Angle Error [deg]')
+    plt.title('Absolute Normal Angle Error of Mirror Plane Estimation')
+    plt.xlabel('Nominal Distance to Mirror [m]')
+    plt.ylabel('Absolute Normal Angle Error [deg]')
     plt.grid(True, linestyle='--', alpha=0.7)
     plt.legend()
     # plt.ylim(0, 10) # 必要ならY軸の範囲を固定
@@ -141,11 +150,11 @@ def main():
     print(f"グラフ保存: {save_path_angle}")
 
     # 3. 符号付き距離誤差グラフ
-    has_signed = (
+    has_signed_distance = (
         'DistErrSigned_Mean' in df_summary.columns
         and df_summary['DistErrSigned_Mean'].notna().any()
     )
-    if has_signed:
+    if has_signed_distance:
         plt.figure(figsize=(8, 6))
         for i, angle in enumerate(angles):
             subset = df_summary[
@@ -161,7 +170,7 @@ def main():
 
         plt.axhline(0.0, color='gray', linestyle='--', linewidth=1)
         plt.title('Signed Distance Error of Mirror Plane Estimation')
-        plt.xlabel('Distance to Mirror [m]')
+        plt.xlabel('Nominal Distance to Mirror [m]')
         plt.ylabel('Signed Distance Error [mm]')
         plt.grid(True, linestyle='--', alpha=0.7)
         plt.legend()
@@ -171,6 +180,38 @@ def main():
         print(f"グラフ保存: {save_path_signed}")
     else:
         print("Signed distance data not found; skipping signed distance graph.")
+
+    # 4. 符号付き角度誤差グラフ
+    has_signed_angle = (
+        'AngleErrSigned_Mean' in df_summary.columns
+        and df_summary['AngleErrSigned_Mean'].notna().any()
+    )
+    if has_signed_angle:
+        plt.figure(figsize=(8, 6))
+        for i, angle in enumerate(angles):
+            subset = df_summary[
+                (df_summary['Angle'] == angle)
+                & (df_summary['AngleErrSigned_Mean'].notna())
+            ]
+            if len(subset) == 0:
+                continue
+            color = colors[i % len(colors)]
+            plt.errorbar(subset['Distance'], subset['AngleErrSigned_Mean'],
+                         yerr=subset['AngleErrSigned_Std'], fmt='-v',
+                         label=f'{angle} deg', color=color, capsize=5)
+
+        plt.axhline(0.0, color='gray', linestyle='--', linewidth=1)
+        plt.title('Signed Normal Angle Error of Mirror Plane Estimation')
+        plt.xlabel('Nominal Distance to Mirror [m]')
+        plt.ylabel('Signed Normal Angle Error [deg]')
+        plt.grid(True, linestyle='--', alpha=0.7)
+        plt.legend()
+
+        save_path_signed_angle = os.path.join(output_dir, 'graph_angle_error_signed.png')
+        plt.savefig(save_path_signed_angle, dpi=300)
+        print(f"グラフ保存: {save_path_signed_angle}")
+    else:
+        print("Signed angle data not found; skipping signed angle graph.")
 
 if __name__ == '__main__':
     main()
