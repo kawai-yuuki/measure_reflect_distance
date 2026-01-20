@@ -68,7 +68,7 @@ def generate_launch_description():
                 default_value=[
                     TextSubstitution(text="/media/"),
                     EnvironmentVariable("USER"),
-                    TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt"),
+                    TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/finetuning/unet_mirror_finetuned.pt"),
                 ],
                 description="Path to the UNet weight file; defaults to the KIOXIA drive mounted under /media/<user>/KIOXIA.",
             ),
@@ -97,19 +97,19 @@ def generate_launch_description():
                 default_value=TextSubstitution(text="1"),
                 description="Number of OpenCV threads (cv2.setNumThreads).",
             ),
-            Node(
-                package="measure_reflect_distance",
-                executable="rgb_relay_node",
-                name="rgb_relay_node",
-                output="screen",
-                parameters=[
-                    {
-                        "input_topic": rgb_topic,
-                        "output_topic": relay_rgb_topic,
-                        "max_fps": ParameterValue(relay_max_fps, value_type=float),
-                    }
-                ],
-            ),
+            # Node(
+            #     package="measure_reflect_distance",
+            #     executable="rgb_relay_node",
+            #     name="rgb_relay_node",
+            #     output="screen",
+            #     parameters=[
+            #         {
+            #             "input_topic": rgb_topic,
+            #             "output_topic": relay_rgb_topic,
+            #             "max_fps": ParameterValue(relay_max_fps, value_type=float),
+            #         }
+            #     ],
+            # ),
             Node(
                 package="measure_reflect_distance",
                 executable="unet_inference_node",
@@ -117,7 +117,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "image_topic": relay_rgb_topic,
+                        "image_topic": rgb_topic,
                         "mask_topic": raw_mask_topic,
                         "max_fps": ParameterValue(unet_max_fps, value_type=float),
                         "model_path": model_path,
@@ -138,7 +138,7 @@ def generate_launch_description():
                 output="screen",
                 parameters=[
                     {
-                        "rgb_topic": relay_rgb_topic,
+                        "rgb_topic": rgb_topic,
                         "mask_topic": raw_mask_topic,
                         "output_topic": processed_mask_topic,
                         "sync_queue_size": ParameterValue(
