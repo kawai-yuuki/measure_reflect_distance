@@ -40,6 +40,7 @@ setup(
             'mirror_surface_marker_node = measure_reflect_distance.mirror_surface_marker_node:main',
             'wall_plane_marker_node = measure_reflect_distance.wall_plane_marker_node:main',
             'pipeline_metrics_logger_node = measure_reflect_distance.pipeline_metrics_logger_node:main',
+            'mirror_pointcloud_filter_node = measure_reflect_distance.mirror_pointcloud_filter_node:main',
         ],
     },
 )

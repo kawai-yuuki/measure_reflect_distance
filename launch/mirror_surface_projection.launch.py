@@ -23,6 +23,7 @@ def generate_launch_description() -> LaunchDescription:
     point_scale = LaunchConfiguration("point_scale")
     raw_marker_topic = LaunchConfiguration("raw_marker_topic")
     projected_points_topic = LaunchConfiguration("projected_points_topic")
+    mirror_points_topic = LaunchConfiguration("mirror_points_topic")
 
     grid_resolution = LaunchConfiguration("grid_resolution")
     grid_density_threshold = LaunchConfiguration("grid_density_threshold")
@@ -49,6 +50,11 @@ def generate_launch_description() -> LaunchDescription:
                 "projected_points_topic",
                 "mirror_surface_projected_points",
                 "PointCloud2 topic with projected points",
+            ),
+            _declare(
+                "mirror_points_topic",
+                "mirror_surface_projected_points_xyz",
+                "PointCloud2 topic for Nav2 (XYZ-only)",
             ),
             _declare("grid_resolution", "0.01", "Aggregator grid resolution [m]"),
             _declare("grid_density_threshold", "0.2", "Density threshold for polygon extraction"),
@@ -97,6 +103,18 @@ def generate_launch_description() -> LaunchDescription:
                         "grid_update_period_sec": ParameterValue(
                             grid_update_period_sec, value_type=float
                         ),
+                    }
+                ],
+            ),
+            Node(
+                package="measure_reflect_distance",
+                executable="mirror_pointcloud_filter_node",
+                name="mirror_pointcloud_filter_node",
+                output="screen",
+                parameters=[
+                    {
+                        "input_topic": projected_points_topic,
+                        "output_topic": mirror_points_topic,
                     }
                 ],
             ),
