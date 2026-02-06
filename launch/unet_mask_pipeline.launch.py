@@ -14,6 +14,13 @@ def generate_launch_description():
     processed_mask_topic = LaunchConfiguration("processed_mask_topic")
     sync_queue_size = LaunchConfiguration("sync_queue_size")
     sync_slop = LaunchConfiguration("sync_slop")
+    binarize_threshold = LaunchConfiguration("binarize_threshold")
+    binarize_max_value = LaunchConfiguration("binarize_max_value")
+    morph_operation = LaunchConfiguration("morph_operation")
+    morph_kernel_shape = LaunchConfiguration("morph_kernel_shape")
+    morph_kernel_width = LaunchConfiguration("morph_kernel_width")
+    morph_kernel_height = LaunchConfiguration("morph_kernel_height")
+    morph_iterations = LaunchConfiguration("morph_iterations")
     model_path = LaunchConfiguration("model_path")
     profile_enabled = LaunchConfiguration("profile_enabled")
     profile_interval = LaunchConfiguration("profile_interval")
@@ -64,11 +71,48 @@ def generate_launch_description():
                 description="Allowed timestamp delta (seconds) for synchronized RGB and mask frames.",
             ),
             DeclareLaunchArgument(
+                "binarize_threshold",
+                default_value=TextSubstitution(text="127"),
+                description="Threshold for mask binarization (0-255).",
+            ),
+            DeclareLaunchArgument(
+                "binarize_max_value",
+                default_value=TextSubstitution(text="255"),
+                description="Max value assigned to foreground pixels after binarization (1-255).",
+            ),
+            DeclareLaunchArgument(
+                "morph_operation",
+                default_value=TextSubstitution(text="open"),
+                description="Morphology op: none|close|open|erode|dilate.",
+            ),
+            DeclareLaunchArgument(
+                "morph_kernel_shape",
+                default_value=TextSubstitution(text="rect"),
+                description="Kernel shape: rect|ellipse|cross.",
+            ),
+            DeclareLaunchArgument(
+                "morph_kernel_width",
+                default_value=TextSubstitution(text="11"),
+                description="Kernel width for morphological closing.",
+            ),
+            DeclareLaunchArgument(
+                "morph_kernel_height",
+                default_value=TextSubstitution(text="11"),
+                description="Kernel height for morphological closing.",
+            ),
+            DeclareLaunchArgument(
+                "morph_iterations",
+                default_value=TextSubstitution(text="1"),
+                description="Number of closing iterations (0 disables closing).",
+            ),
+            DeclareLaunchArgument(
                 "model_path",
                 default_value=[
-                    TextSubstitution(text="/media/"),
+                    # TextSubstitution(text="/media/"),
+                    TextSubstitution(text="/home/"),
                     EnvironmentVariable("USER"),
-                    TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/finetuning/unet_mirror_finetuned.pt"),
+                    # TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/finetuning/unet_mirror_finetuned.pt"),
+                    TextSubstitution(text="/ssd_storage1/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt"),
                 ],
                 description="Path to the UNet weight file; defaults to the KIOXIA drive mounted under /media/<user>/KIOXIA.",
             ),
@@ -145,6 +189,23 @@ def generate_launch_description():
                             sync_queue_size, value_type=int
                         ),
                         "sync_slop": ParameterValue(sync_slop, value_type=float),
+                        "binarize_threshold": ParameterValue(
+                            binarize_threshold, value_type=int
+                        ),
+                        "binarize_max_value": ParameterValue(
+                            binarize_max_value, value_type=int
+                        ),
+                        "morph_operation": morph_operation,
+                        "morph_kernel_shape": morph_kernel_shape,
+                        "morph_kernel_width": ParameterValue(
+                            morph_kernel_width, value_type=int
+                        ),
+                        "morph_kernel_height": ParameterValue(
+                            morph_kernel_height, value_type=int
+                        ),
+                        "morph_iterations": ParameterValue(
+                            morph_iterations, value_type=int
+                        ),
                     }
                 ],
             ),

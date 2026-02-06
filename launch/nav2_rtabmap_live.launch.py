@@ -1,8 +1,9 @@
 import os
 from launch import LaunchDescription
-from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument
+from launch.actions import IncludeLaunchDescription, DeclareLaunchArgument, LogInfo
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 from ament_index_python.packages import get_package_share_directory
 
 def _declare(name: str, default: str, desc: str) -> DeclareLaunchArgument:
@@ -16,12 +17,11 @@ def generate_launch_description() -> LaunchDescription:
     rtabmap_launch = os.path.join(rtabmap_share, "launch", "rtabmap.launch.py")
     default_rviz_cfg = os.path.join(pkg_share, "config", "debug.rgbd.rviz")
     
-    # --- [追加] Nav2関連のパス取得 ---
-    nav2_bringup_dir = get_package_share_directory('nav2_bringup')
-    nav2_launch_path = os.path.join(nav2_bringup_dir, 'launch', 'navigation_launch.py')
-    # デフォルトのパラメータファイルパス（必要に応じて自分のパッケージ内のパスに変更してください）
-    # 例: os.path.join(pkg_share, 'config', 'nav2_params.yaml')
-    default_nav2_params = os.path.join(pkg_share, "config", "nav2_params.yaml") 
+    # デフォルトのパラメータファイルパス（launchファイル基準で解決）
+    # symlink-install 時は src 側、通常ビルド時は install 側の config を参照します
+    default_nav2_params = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "config", "nav2_params.yaml")
+    )
     # -----------------------------
 
     defaults = {
@@ -34,7 +34,14 @@ def generate_launch_description() -> LaunchDescription:
             "--Vis/CorNNDR 0.75 "
             "--Vis/MaxFeatures 1500 "
             "--RGBD/CreateOccupancyGrid true " # Nav2にはこれが必須 (OK)
-            "--Grid/CellSize 0.05 "
+            "--Grid/CellSize 0.01 "
+            "--Grid\ClusterRadius = 0.05 "
+            "--Grid/MinGroundHeight -0.45 "
+            "--Grid/MaxGroundHeight 0.0 "
+            "--Grid/MaxObstacleHeight 0.0 "
+            "--Grid\MinObstacleHeight = -0.5 "
+            "--Grid/MaxGroundAngle 15 "
+            "--Grid\MinClusterSize = 5 "
             "--Vis/MinInliers 30 "
             "--Icp/Iterations 30 "
         ),
@@ -66,6 +73,7 @@ def generate_launch_description() -> LaunchDescription:
         _declare("use_sim_time", defaults["use_sim_time"], "Use simulation clock"),
         # --- [追加] Nav2用引数 ---
         _declare("nav2_params_file", defaults["nav2_params_file"], "Full path to the ROS2 parameters file to use for all launched nodes"),
+        _declare("autostart", "true", "Automatically startup the nav2 stack"),
     ]
 
     forward_args = {
@@ -84,13 +92,113 @@ def generate_launch_description() -> LaunchDescription:
     )
 
     # 2. [追加] Nav2の起動
-    # map_serverやamclを含まない navigation_launch.py を使用します
-    include_nav2 = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(nav2_launch_path),
-        launch_arguments={
-            'use_sim_time': LaunchConfiguration('use_sim_time'),
-            'params_file': LaunchConfiguration('nav2_params_file'),
-        }.items(),
+    # nav2_bringup経由だとparamsが反映されない場合があるため、必要なノードを直接起動
+    nav2_params = LaunchConfiguration("nav2_params_file")
+    use_sim_time = LaunchConfiguration("use_sim_time")
+    autostart = LaunchConfiguration("autostart")
+    remappings = [('/tf', 'tf'), ('/tf_static', 'tf_static')]
+
+    controller_server = Node(
+        package='nav2_controller',
+        executable='controller_server',
+        name='controller_server',
+        output='screen',
+        parameters=[
+            nav2_params,
+            {
+                'use_sim_time': use_sim_time,
+                'FollowPath.critics': [
+                    'RotateToGoal',
+                    'Oscillation',
+                    'BaseObstacle',
+                    'GoalAlign',
+                    'PathAlign',
+                    'PathDist',
+                    'GoalDist',
+                ],
+            },
+        ],
+        remappings=remappings + [('cmd_vel', 'cmd_vel_nav')],
+    )
+    smoother_server = Node(
+        package='nav2_smoother',
+        executable='smoother_server',
+        name='smoother_server',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings,
+    )
+    planner_server = Node(
+        package='nav2_planner',
+        executable='planner_server',
+        name='planner_server',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings,
+    )
+    behavior_server = Node(
+        package='nav2_behaviors',
+        executable='behavior_server',
+        name='behavior_server',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings,
+    )
+    bt_navigator = Node(
+        package='nav2_bt_navigator',
+        executable='bt_navigator',
+        name='bt_navigator',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings,
+    )
+    waypoint_follower = Node(
+        package='nav2_waypoint_follower',
+        executable='waypoint_follower',
+        name='waypoint_follower',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings,
+    )
+    velocity_smoother = Node(
+        package='nav2_velocity_smoother',
+        executable='velocity_smoother',
+        name='velocity_smoother',
+        output='screen',
+        parameters=[nav2_params, {'use_sim_time': use_sim_time}],
+        remappings=remappings + [('cmd_vel', 'cmd_vel_nav'), ('cmd_vel_smoothed', 'cmd_vel')],
+    )
+    lifecycle_manager = Node(
+        package='nav2_lifecycle_manager',
+        executable='lifecycle_manager',
+        name='lifecycle_manager_navigation',
+        output='screen',
+        parameters=[{
+            'use_sim_time': use_sim_time,
+            'autostart': autostart,
+            'node_names': [
+                'controller_server',
+                'smoother_server',
+                'planner_server',
+                'behavior_server',
+                'bt_navigator',
+                'waypoint_follower',
+                'velocity_smoother',
+            ],
+        }],
     )
 
-    return LaunchDescription([*declares, include_rtabmap, include_nav2])
+    return LaunchDescription([
+        *declares,
+        LogInfo(msg=["[nav2] params_file: ", LaunchConfiguration("nav2_params_file")]),
+        LogInfo(msg=["[nav2] use_sim_time: ", LaunchConfiguration("use_sim_time")]),
+        include_rtabmap,
+        controller_server,
+        smoother_server,
+        planner_server,
+        behavior_server,
+        bt_navigator,
+        waypoint_follower,
+        velocity_smoother,
+        lifecycle_manager,
+    ])
