@@ -22,8 +22,6 @@ def generate_launch_description() -> LaunchDescription:
         "args": (
             "-d "
             "--Optimizer/Strategy 2 "
-            "--Vis/CorNNDR 0.75 "
-            "--Vis/MaxFeatures 1500 "
             # "--RGBD/ProximityBySpace false "
             # "--RGBD/ProximityByTime false "
             # "--RGBD/LoopClosureReextractFeatures false "
@@ -33,7 +31,6 @@ def generate_launch_description() -> LaunchDescription:
             "--Grid/CellSize 0.05 "
             # "--Vis/InlierDistance 0.03 "
             # "--Icp/MaxCorrespondenceDistance 0.05 "
-            "--Vis/MinInliers 30 "
             "--Icp/Iterations 30 "
         ),
         "rgb_topic": "/camera/camera/color/image_raw",
