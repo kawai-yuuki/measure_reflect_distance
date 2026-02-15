@@ -1,11 +1,24 @@
+import os
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import EnvironmentVariable, LaunchConfiguration, TextSubstitution
+from launch.substitutions import LaunchConfiguration, TextSubstitution
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
+    username = os.environ.get("USER") or os.path.basename(os.path.expanduser("~"))
+    default_model_path = os.path.join(
+        "/media",
+        username,
+        "KIOXIA",
+        "segmentation_model",
+        "mirror",
+        "outputs_unet_min2",
+        "finetune_best.pt",
+    )
+
     rgb_topic = LaunchConfiguration("rgb_topic")
     relay_rgb_topic = LaunchConfiguration("relay_rgb_topic")
     relay_max_fps = LaunchConfiguration("relay_max_fps")
@@ -82,7 +95,7 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "morph_operation",
-                default_value=TextSubstitution(text="open"),
+                default_value=TextSubstitution(text="close"),
                 description="Morphology op: none|close|open|erode|dilate.",
             ),
             DeclareLaunchArgument(
@@ -92,29 +105,23 @@ def generate_launch_description():
             ),
             DeclareLaunchArgument(
                 "morph_kernel_width",
-                default_value=TextSubstitution(text="11"),
+                default_value=TextSubstitution(text="9"),
                 description="Kernel width for morphological closing.",
             ),
             DeclareLaunchArgument(
                 "morph_kernel_height",
-                default_value=TextSubstitution(text="11"),
+                default_value=TextSubstitution(text="9"),
                 description="Kernel height for morphological closing.",
             ),
             DeclareLaunchArgument(
                 "morph_iterations",
-                default_value=TextSubstitution(text="1"),
+                default_value=TextSubstitution(text="2"),
                 description="Number of closing iterations (0 disables closing).",
             ),
             DeclareLaunchArgument(
                 "model_path",
-                default_value=[
-                    # TextSubstitution(text="/media/"),
-                    TextSubstitution(text="/home/"),
-                    EnvironmentVariable("USER"),
-                    # TextSubstitution(text="/KIOXIA/segmentation_model/mirror/saved_model/finetuning/unet_mirror_finetuned.pt"),
-                    TextSubstitution(text="/ssd_storage1/KIOXIA/segmentation_model/mirror/saved_model/original_dataset/best.pt"),
-                ],
-                description="Path to the UNet weight file; defaults to the KIOXIA drive mounted under /media/<user>/KIOXIA.",
+                default_value=TextSubstitution(text=default_model_path),
+                description="Path to the UNet weight file.",
             ),
             DeclareLaunchArgument(
                 "profile_enabled",

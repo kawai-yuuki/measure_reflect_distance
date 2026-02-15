@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -9,6 +10,7 @@ import rclpy
 import sensor_msgs_py.point_cloud2 as pc2
 from rclpy.node import Node
 from sensor_msgs.msg import PointCloud2
+from std_msgs.msg import Header
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
@@ -58,6 +60,8 @@ class ClusterGrid:
             return None
         width = self.max_i - self.min_i + 1
         height = self.max_j - self.min_j + 1
+        if width <= 0 or height <= 0:
+            return None
         grid = np.zeros((height, width), dtype=np.float32)
         for (i, j), value in self.counts.items():
             grid[j - self.min_j, i - self.min_i] = float(value)
@@ -65,11 +69,31 @@ class ClusterGrid:
             grid /= grid.max()
         return grid
 
+    def clear(self) -> None:
+        self.counts.clear()
+        self.min_i = 0
+        self.max_i = -1
+        self.min_j = 0
+        self.max_j = -1
+        self.total_points = 0.0
+        self.polygon_cache = None
+
     def grid_to_world(self, i: int, j: int) -> np.ndarray:
         return (
             self.origin
             + self.tangent * ((i + 0.5) * self.resolution)
             + self.binormal * ((j + 0.5) * self.resolution)
+        )
+
+    def grid_indices_to_world(self, i_indices: np.ndarray, j_indices: np.ndarray) -> np.ndarray:
+        i = i_indices.astype(np.float64, copy=False)
+        j = j_indices.astype(np.float64, copy=False)
+        u = (i + 0.5) * self.resolution
+        v = (j + 0.5) * self.resolution
+        return (
+            self.origin[None, :]
+            + u[:, None] * self.tangent[None, :]
+            + v[:, None] * self.binormal[None, :]
         )
 
 
@@ -88,6 +112,12 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
         self.declare_parameter("grid_density_threshold", 0.2)
         self.declare_parameter("min_points", 10)
         self.declare_parameter("marker_line_width", 0.01)
+        self.declare_parameter("polygon_points_topic", "mirror_surface_projected_points_polygon")
+        self.declare_parameter("publish_polygon_pointcloud", True)
+        self.declare_parameter("polygon_point_stride_cells", 2)
+        self.declare_parameter("max_grid_cells", 2_000_000)
+        self.declare_parameter("grid_reset_translation_thresh", 0.5)
+        self.declare_parameter("grid_reset_angle_deg", 15.0)
 
         points_topic = self.get_parameter("projected_points_topic").get_parameter_value().string_value
         self._cluster_plane_topic = (
@@ -95,6 +125,13 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
         )
         marker_topic = self.get_parameter("marker_topic").get_parameter_value().string_value
         self.target_frame = self.get_parameter("target_frame").get_parameter_value().string_value
+        self._polygon_points_topic = (
+            self.get_parameter("polygon_points_topic").get_parameter_value().string_value
+        )
+        self._publish_polygon_pointcloud = bool(self.get_parameter("publish_polygon_pointcloud").value)
+        self._polygon_point_stride_cells = max(
+            1, int(self.get_parameter("polygon_point_stride_cells").get_parameter_value().integer_value)
+        )
         self._grid_resolution = max(
             1e-4, self.get_parameter("grid_resolution").get_parameter_value().double_value
         )
@@ -109,8 +146,22 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
         self.marker_line_width = max(
             0.001, self.get_parameter("marker_line_width").get_parameter_value().double_value
         )
+        self._max_grid_cells = max(
+            1024, int(self.get_parameter("max_grid_cells").get_parameter_value().integer_value)
+        )
+        self._grid_reset_translation_thresh = max(
+            0.0, float(self.get_parameter("grid_reset_translation_thresh").get_parameter_value().double_value)
+        )
+        self._grid_reset_angle_deg = min(
+            180.0, max(0.0, float(self.get_parameter("grid_reset_angle_deg").get_parameter_value().double_value))
+        )
 
         self.marker_pub = self.create_publisher(MarkerArray, marker_topic, 10)
+        self.polygon_points_pub = (
+            self.create_publisher(PointCloud2, self._polygon_points_topic, 10)
+            if self._publish_polygon_pointcloud
+            else None
+        )
         self.create_subscription(PointCloud2, points_topic, self._points_callback, 10)
         self.create_subscription(
             Float64MultiArray,
@@ -125,7 +176,9 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
 
         self.get_logger().info(
             "MirrorSurfaceProjectionAggregatorNode ready "
-            f"(points_topic={points_topic}, marker_topic={marker_topic}, cluster_plane_topic={self._cluster_plane_topic})"
+            f"(points_topic={points_topic}, marker_topic={marker_topic}, "
+            f"cluster_plane_topic={self._cluster_plane_topic}, "
+            f"polygon_points_topic={self._polygon_points_topic}, max_grid_cells={self._max_grid_cells})"
         )
 
     def _cluster_plane_callback(self, msg: Float64MultiArray) -> None:
@@ -182,11 +235,27 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
                 resolution=self._grid_resolution,
             )
         else:
-            grid.origin = point.copy()
-            grid.tangent = tangent.copy()
-            grid.binormal = binormal.copy()
-            grid.normal = normal.copy()
-            grid.resolution = self._grid_resolution
+            shift = float(np.linalg.norm(point - grid.origin))
+            cos_angle = float(np.clip(abs(np.dot(grid.normal, normal)), -1.0, 1.0))
+            angle_deg = math.degrees(math.acos(cos_angle))
+            should_reset = (
+                shift > self._grid_reset_translation_thresh
+                or angle_deg > self._grid_reset_angle_deg
+            )
+            if should_reset:
+                self.get_logger().warn(
+                    f"Reset cluster grid #{cluster_id}: shift={shift:.3f} m, angle={angle_deg:.2f} deg"
+                )
+                grid = ClusterGrid(
+                    origin=point.copy(),
+                    tangent=tangent.copy(),
+                    binormal=binormal.copy(),
+                    normal=normal.copy(),
+                    resolution=self._grid_resolution,
+                )
+            else:
+                # Keep the original grid basis while accumulating to avoid index-space drift.
+                grid.resolution = self._grid_resolution
         self._cluster_grids[cluster_id] = grid
 
     def _points_callback(self, msg: PointCloud2) -> None:
@@ -223,8 +292,21 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
     def _process_grids(self) -> None:
         marker_array = MarkerArray()
         marker_id = 0
+        polygon_cloud_points: List[Tuple[float, float, float]] = []
+        now_msg = self.get_clock().now().to_msg()
+
         for cluster_id, grid in list(self._cluster_grids.items()):
             if grid.total_points < self._min_points:
+                continue
+            width = grid.max_i - grid.min_i + 1
+            height = grid.max_j - grid.min_j + 1
+            if width <= 0 or height <= 0:
+                continue
+            if width * height > self._max_grid_cells:
+                self.get_logger().warn(
+                    f"Skipping oversized grid #{cluster_id}: {width}x{height} cells. Clearing accumulated points."
+                )
+                grid.clear()
                 continue
             density = grid.as_density_map()
             if density is None or density.size == 0:
@@ -233,6 +315,23 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
             _, binary = cv2.threshold(density, threshold, 1.0, cv2.THRESH_BINARY)
             binary_uint8 = (binary * 255).astype(np.uint8)
             contours, _ = cv2.findContours(binary_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours and self._publish_polygon_pointcloud:
+                fill_mask = np.zeros_like(binary_uint8, dtype=np.uint8)
+                cv2.drawContours(fill_mask, contours, contourIdx=-1, color=255, thickness=cv2.FILLED)
+                ys, xs = np.nonzero(fill_mask)
+                if ys.size > 0:
+                    stride = self._polygon_point_stride_cells
+                    if stride > 1:
+                        keep = ((ys % stride) == 0) & ((xs % stride) == 0)
+                        ys = ys[keep]
+                        xs = xs[keep]
+                    if ys.size > 0:
+                        cell_i = xs.astype(np.int64, copy=False) + int(grid.min_i)
+                        cell_j = ys.astype(np.int64, copy=False) + int(grid.min_j)
+                        world_points = grid.grid_indices_to_world(cell_i, cell_j)
+                        polygon_cloud_points.extend(
+                            (float(p[0]), float(p[1]), float(p[2])) for p in world_points
+                        )
             for contour in contours:
                 if contour.shape[0] < 3:
                     continue
@@ -245,7 +344,7 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
                     continue
                 marker = Marker()
                 marker.header.frame_id = self.target_frame
-                marker.header.stamp = self.get_clock().now().to_msg()
+                marker.header.stamp = now_msg
                 marker.ns = "mirror_surface_projection_aggregated"
                 marker.id = marker_id
                 marker.type = Marker.LINE_STRIP
@@ -269,21 +368,33 @@ class MirrorSurfaceProjectionAggregatorNode(Node):
         elif self._last_publish_had_data:
             delete_all = Marker()
             delete_all.header.frame_id = self.target_frame
-            delete_all.header.stamp = self.get_clock().now().to_msg()
+            delete_all.header.stamp = now_msg
             delete_all.action = Marker.DELETEALL
             marker_array.markers.append(delete_all)
             self.marker_pub.publish(marker_array)
             self._last_publish_had_data = False
 
+        if self._publish_polygon_pointcloud and self.polygon_points_pub is not None and polygon_cloud_points:
+            header = Header()
+            header.stamp = now_msg
+            header.frame_id = self.target_frame
+            cloud = pc2.create_cloud_xyz32(header, polygon_cloud_points)
+            self.polygon_points_pub.publish(cloud)
+
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = MirrorSurfaceProjectionAggregatorNode()
+    node = None
     try:
+        node = MirrorSurfaceProjectionAggregatorNode()
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

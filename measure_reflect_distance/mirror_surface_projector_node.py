@@ -46,6 +46,8 @@ class MirrorSurfaceProjectorNode(Node):
         self.declare_parameter("pixel_stride", 2)
         self.declare_parameter("point_scale", 0.03)
         self.declare_parameter("max_fps", 5.0)
+        self.declare_parameter("projection_min_abs_denom", 1e-4)
+        self.declare_parameter("max_projection_distance", 10.0)
 
         # Cluster/plane parameters
         self.declare_parameter("clustered_observation_topic", "mirror_plane_clustered_observation")
@@ -85,6 +87,12 @@ class MirrorSurfaceProjectorNode(Node):
         )
         self._point_scale = max(0.001, self.get_parameter("point_scale").get_parameter_value().double_value)
         self._max_fps = float(self.get_parameter("max_fps").get_parameter_value().double_value)
+        self._projection_min_abs_denom = max(
+            1e-9, float(self.get_parameter("projection_min_abs_denom").get_parameter_value().double_value)
+        )
+        self._max_projection_distance = max(
+            0.0, float(self.get_parameter("max_projection_distance").get_parameter_value().double_value)
+        )
         self._min_interval_ns = 0 if self._max_fps <= 0.0 else int(1e9 / self._max_fps)
         self._last_process_time: Optional[Time] = None
 
@@ -125,7 +133,10 @@ class MirrorSurfaceProjectorNode(Node):
 
         self.get_logger().info(
             "MirrorSurfaceProjectorNode ready "
-            f"(mask_topic={mask_topic}, camera_info_topic={camera_info_topic}, cluster_plane_topic={self._cluster_plane_topic})"
+            f"(mask_topic={mask_topic}, camera_info_topic={camera_info_topic}, "
+            f"cluster_plane_topic={self._cluster_plane_topic}, "
+            f"projection_min_abs_denom={self._projection_min_abs_denom:.1e}, "
+            f"max_projection_distance={self._max_projection_distance:.2f}m)"
         )
 
     def _cluster_observation_callback(self, msg: Float64MultiArray) -> None:
@@ -381,10 +392,12 @@ class MirrorSurfaceProjectorNode(Node):
                 dir_camera = np.array([(u - cx) / fx, (v - cy) / fy, 1.0], dtype=np.float64)
                 dir_target = R_target_camera @ dir_camera
                 denom = float(np.dot(plane_normal, dir_target))
-                if abs(denom) < 1e-9:
+                if abs(denom) < self._projection_min_abs_denom:
                     continue
                 t = -(float(np.dot(plane_normal, origin_target)) + plane_offset) / denom
                 if t <= 0.0:
+                    continue
+                if self._max_projection_distance > 0.0 and t > self._max_projection_distance:
                     continue
                 point_world = origin_target + dir_target * t
                 polygon_points.append(point_world)
@@ -425,13 +438,15 @@ class MirrorSurfaceProjectorNode(Node):
         dir_target = dirs_camera @ R_target_camera.T
         denom = dir_target @ plane_normal
         origin_dot = float(plane_normal @ origin_target) + plane_offset
-        valid = np.abs(denom) > 1e-9
+        valid = np.abs(denom) > self._projection_min_abs_denom
         if not np.any(valid):
             return None
         denom = denom[valid]
         dir_target = dir_target[valid]
         t = -origin_dot / denom
         valid = t > 0.0
+        if self._max_projection_distance > 0.0:
+            valid = valid & (t <= self._max_projection_distance)
         if not np.any(valid):
             return None
         dir_target = dir_target[valid]
@@ -542,12 +557,17 @@ class MirrorSurfaceProjectorNode(Node):
 
 def main(args=None) -> None:
     rclpy.init(args=args)
-    node = MirrorSurfaceProjectorNode()
+    node = None
     try:
+        node = MirrorSurfaceProjectorNode()
         rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        node.destroy_node()
-        rclpy.shutdown()
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

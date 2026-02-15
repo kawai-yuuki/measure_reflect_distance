@@ -23,6 +23,7 @@ R = I - 2 n n^T,  t = 2 d n
 """
 
 import math
+import time
 import numpy as np
 
 import rclpy
@@ -53,6 +54,9 @@ class MirrorPlaneEstimator(Node):
         self.declare_parameter('t_ct_rpy', [-0.023080,0.001224,-3.131105])  # [rad] roll, pitch, yaw
         self.declare_parameter('publish_tf', True)  # 可視化TFを出すか
         self.declare_parameter('tag_tf_timeout_sec', 0.5)  # 鏡像タグの TF がこの秒数古ければ無効とみなす
+        self.declare_parameter('tag_clock_mismatch_threshold_sec', 3600.0)  # システム時刻系との乖離を判定する閾値 [s]
+        self.declare_parameter('tf_reliability_max_normal_angle_deg', 40.0)  # 想定法線との角度閾値 [deg]
+        self.declare_parameter('require_reliable_tf', True)  # True: 信頼度が低い推定は出力しない
         self.declare_parameter('max_detection_distance', 4.0)  # 実タグ-鏡像タグの距離上限 [m]
 
         # ---- パラメータ取得 ----
@@ -63,6 +67,13 @@ class MirrorPlaneEstimator(Node):
         t_ct_rpy = np.array(self.get_parameter('t_ct_rpy').value, dtype=float)
         self.publish_tf = bool(self.get_parameter('publish_tf').value)
         self.tag_tf_timeout = float(self.get_parameter('tag_tf_timeout_sec').value)
+        self.tag_clock_mismatch_threshold = max(
+            0.0, float(self.get_parameter('tag_clock_mismatch_threshold_sec').value)
+        )
+        self.tf_reliability_max_normal_angle_deg = min(
+            180.0, max(0.0, float(self.get_parameter('tf_reliability_max_normal_angle_deg').value))
+        )
+        self.require_reliable_tf = bool(self.get_parameter('require_reliable_tf').value)
         self.max_detection_distance = float(self.get_parameter('max_detection_distance').value)
         # 実タグ→カメラ: T_c<-t を4x4に構成
         R_ct = rot_from_rpy(t_ct_rpy[0], t_ct_rpy[1], t_ct_rpy[2])
@@ -76,6 +87,10 @@ class MirrorPlaneEstimator(Node):
         self._plane_visible = False
         self._warned_missing_out_tf = False  # output_frame との TF が未接続な場合の一度きり警告制御
         self._warned_stale_tag_tf = False
+        self._warned_clock_mismatch = False
+        self._warned_unreliable_tf = False
+        self._last_tag_stamp_ns: int | None = None
+        self._last_tag_stamp_change_mono = time.monotonic()
 
         # ---- Publisher ----
         # 数値は Float64MultiArray として出し、可視化は別ノード（mapper）に任せる
@@ -87,7 +102,10 @@ class MirrorPlaneEstimator(Node):
 
         self.get_logger().info(
             f'[mirror_plane_estimator] camera_frame={self.cam_frame}, '
-            f'output_frame={self.out_frame}, tag_frame={self.tag_frame}'
+            f'output_frame={self.out_frame}, tag_frame={self.tag_frame}, '
+            f'tag_tf_timeout={self.tag_tf_timeout:.2f}s, '
+            f'max_normal_angle={self.tf_reliability_max_normal_angle_deg:.1f}deg, '
+            f'require_reliable_tf={self.require_reliable_tf}'
         )
 
         self._last_log_ns = 0
@@ -114,9 +132,40 @@ class MirrorPlaneEstimator(Node):
 
         # --- 古い鏡像 TF は無効 ---
         tag_stamp = ts.header.stamp
-        tag_age = (now_ros.nanoseconds - (tag_stamp.sec * 1_000_000_000 + tag_stamp.nanosec)) / 1e9
-        if tag_age < 0.0:
-            tag_age = 0.0
+        tag_stamp_ns = tag_stamp.sec * 1_000_000_000 + tag_stamp.nanosec
+        now_mono = time.monotonic()
+        if self._last_tag_stamp_ns != tag_stamp_ns:
+            self._last_tag_stamp_ns = tag_stamp_ns
+            self._last_tag_stamp_change_mono = now_mono
+
+        # 基本は ROS 時刻差で stale 判定する。
+        # ただし use_sim_time=false かつ TF stamp が現在時刻系から大きく乖離している場合は、
+        # stamp が実際に更新された壁時計時刻を鮮度判定に使ってフォールバックする。
+        ros_age = (now_ros.nanoseconds - tag_stamp_ns) / 1e9
+        if ros_age < 0.0:
+            ros_age = 0.0
+
+        clock = self.get_clock()
+        ros_time_active = bool(getattr(clock, 'ros_time_is_active', False))
+        clock_mismatch = (
+            self.tag_clock_mismatch_threshold > 0.0
+            and (not ros_time_active)
+            and ros_age > self.tag_clock_mismatch_threshold
+        )
+        if clock_mismatch:
+            tag_age = now_mono - self._last_tag_stamp_change_mono
+            if not self._warned_clock_mismatch:
+                self.get_logger().warn(
+                    'Large timestamp skew detected on mirror tag TF '
+                    f'(ros_age={ros_age:.2f}s). '
+                    'Falling back to wall-time freshness from TF stamp updates. '
+                    'If replaying rosbag, prefer use_sim_time:=true.'
+                )
+                self._warned_clock_mismatch = True
+        else:
+            tag_age = ros_age
+            self._warned_clock_mismatch = False
+
         if self.tag_tf_timeout > 0.0 and tag_age > self.tag_tf_timeout:
             # Stale TF means the tag disappeared from view; stop publishing until it returns.
             if not self._warned_stale_tag_tf:
@@ -237,15 +286,24 @@ class MirrorPlaneEstimator(Node):
         angle_deg = math.degrees(math.acos(cos_angle))
         if angle_deg > 180.0:
             angle_deg = 360.0 - angle_deg
-        reliable_tf = reliable_tangent and angle_deg <= 50.0
+        reliable_tf = reliable_tangent and angle_deg <= self.tf_reliability_max_normal_angle_deg
         if not reliable_tf:
-            if self.publish_tf and self.tf_broadcaster is not None:
-                self.get_logger().debug(
-                    "Skipping mirror plane output due to reliability filters "
-                    f"(residual_trans={residual_trans:.3f} m, dist_real={dist_real:.3f} m, "
-                    f"tangent_norm={tangent_norm:.3f})"
+            if not self._warned_unreliable_tf:
+                self.get_logger().warn(
+                    "Mirror plane estimate marked as low reliability "
+                    f"(angle_deg={angle_deg:.1f}, tangent_ok={reliable_tangent}, "
+                    f"residual_trans={residual_trans:.3f} m). "
+                    + (
+                        "Skipping output because require_reliable_tf=true."
+                        if self.require_reliable_tf
+                        else "Continuing to publish because require_reliable_tf=false."
+                    )
                 )
-            return
+                self._warned_unreliable_tf = True
+            if self.require_reliable_tf:
+                return
+        else:
+            self._warned_unreliable_tf = False
 
         # 4) カメラ座標で publish (法線・距離・反射点・接線)
         msg_cam = Float64MultiArray()
@@ -338,7 +396,8 @@ class MirrorPlaneEstimator(Node):
             R_out = None
 
         # 6) 可視化 TF: 平面の最近点 p0 と法線向き
-        if self.publish_tf and self.tf_broadcaster is not None and reliable_tf:
+        should_publish_tf = reliable_tf or (not self.require_reliable_tf)
+        if self.publish_tf and self.tf_broadcaster is not None and should_publish_tf:
             anchor_cam = p_plane_cam
             # カメラ座標側
             now_ns = now_ros.nanoseconds
@@ -390,15 +449,19 @@ class MirrorPlaneEstimator(Node):
                 self.tf_broadcaster.sendTransform(tmsg2)
 
 
-def main():
-    rclpy.init()
-    node = MirrorPlaneEstimator()
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
     try:
+        node = MirrorPlaneEstimator()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

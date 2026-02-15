@@ -463,13 +463,17 @@ class MirrorPlaneMapper(Node):
 
 def main(args=None):
     rclpy.init(args=args)
-    node = MirrorPlaneMapper()
+    node = None
     try:
+        node = MirrorPlaneMapper()
         rclpy.spin(node)
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == "__main__":

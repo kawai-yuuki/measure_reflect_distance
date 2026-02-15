@@ -38,12 +38,17 @@ def generate_launch_description():
     use_sim_time   = LaunchConfiguration("use_sim_time")
     params_file    = LaunchConfiguration("params_file")
     image_topic    = LaunchConfiguration("image_topic")
+    apriltag_masked_image_topic = LaunchConfiguration("apriltag_masked_image_topic")
+    apriltag_exclude_top_ratio = LaunchConfiguration("apriltag_exclude_top_ratio")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
     apriltag_node_name = LaunchConfiguration("apriltag_node_name")
     plane_angle_threshold = LaunchConfiguration("plane_angle_threshold_deg")
     plane_distance_threshold = LaunchConfiguration("plane_distance_threshold")
     plane_display_timeout = LaunchConfiguration("plane_display_timeout_sec")
     tag_tf_timeout = LaunchConfiguration("tag_tf_timeout_sec")
+    tag_clock_mismatch_threshold = LaunchConfiguration("tag_clock_mismatch_threshold_sec")
+    tf_reliability_max_normal_angle_deg = LaunchConfiguration("tf_reliability_max_normal_angle_deg")
+    require_reliable_tf = LaunchConfiguration("require_reliable_tf")
     mapper_plane_topic = LaunchConfiguration("mapper_plane_topic")
     mapper_frame_id = LaunchConfiguration("mapper_frame_id")
     mapper_publish_markers = LaunchConfiguration("mapper_publish_markers")
@@ -57,7 +62,7 @@ def generate_launch_description():
         DeclareLaunchArgument("t_ct_rpy",       default_value="[-0.010357, -0.000770, -3.127285]"),
         DeclareLaunchArgument("publish_tf",     default_value="true"),
         # rosbag / シミュ時間を使う場合 true
-        DeclareLaunchArgument("use_sim_time",   default_value="true"),
+        DeclareLaunchArgument("use_sim_time",   default_value="false"),
         DeclareLaunchArgument(
             "params_file",
             default_value=TextSubstitution(text=default_params),
@@ -67,6 +72,16 @@ def generate_launch_description():
             "image_topic",
             default_value=TextSubstitution(text="/camera/camera/color/image_raw"),
             description="apriltag_ros が購読する画像トピック",
+        ),
+        DeclareLaunchArgument(
+            "apriltag_masked_image_topic",
+            default_value=TextSubstitution(text="/camera/camera/color/image_apriltag_masked"),
+            description="Apriltag 検出専用のマスク済み画像トピック（元画像は変更しない）",
+        ),
+        DeclareLaunchArgument(
+            "apriltag_exclude_top_ratio",
+            default_value=TextSubstitution(text="0.1666667"),
+            description="Apriltag 検出で観測対象外にする画像上部の比率 [0.0, 1.0)",
         ),
         DeclareLaunchArgument(
             "camera_info_topic",
@@ -99,6 +114,21 @@ def generate_launch_description():
             description="鏡像タグ TF がこの秒数以上古い場合は観測無しとみなす",
         ),
         DeclareLaunchArgument(
+            "tag_clock_mismatch_threshold_sec",
+            default_value="3600.0",
+            description="TF stamp がシステム時刻系とこの秒数以上ずれる場合、stale 判定を stamp 更新ベースへ切替",
+        ),
+        DeclareLaunchArgument(
+            "tf_reliability_max_normal_angle_deg",
+            default_value="40.0",
+            description="mirror_plane_cam TF の信頼度判定に使う法線角度閾値 [deg]",
+        ),
+        DeclareLaunchArgument(
+            "require_reliable_tf",
+            default_value="true",
+            description="true の場合、信頼度判定を満たさない鏡面推定は publish しない",
+        ),
+        DeclareLaunchArgument(
             "mapper_plane_topic",
             default_value="mirror_plane",
             description="mirror_plane_mapper が購読する鏡面トピック",
@@ -114,6 +144,21 @@ def generate_launch_description():
             description="mirror_plane_mapper で MarkerArray を publish するかどうか",
         ),
 
+        # --- Apriltag 入力前処理ノード ---
+        # Apriltag 検出専用に画像上部をマスクする。元画像トピックは変更しない。
+        Node(
+            package="measure_reflect_distance",
+            executable="apriltag_exclusion_mask_node",
+            name="apriltag_exclusion_mask_node",
+            output="screen",
+            parameters=[{
+                "input_topic": image_topic,
+                "output_topic": apriltag_masked_image_topic,
+                "exclude_top_ratio": ParameterValue(apriltag_exclude_top_ratio, value_type=float),
+                "use_sim_time": use_sim_time,
+            }],
+        ),
+
         # --- AprilTag Detection ノード ---
         # カメラ画像から AprilTag を検出し TF を出力
         Node(
@@ -126,7 +171,7 @@ def generate_launch_description():
                 {"use_sim_time": use_sim_time},
             ],
             remappings=[
-                ("image_rect", image_topic),
+                ("image_rect", apriltag_masked_image_topic),
                 ("camera_info", camera_info_topic),
             ],
             emulate_tty=True,
@@ -140,7 +185,7 @@ def generate_launch_description():
             name="tag_real_static_broadcaster",
             output="screen",
             parameters=[{
-                "camera_frame":   camera_frame,
+                "parent_frame":   camera_frame,
                 "t_ct_xyz":       t_ct_xyz,  # 文字列 → ノード側で配列に解釈しているならOK
                 "t_ct_rpy":       t_ct_rpy,
                 "use_sim_time":   use_sim_time,
@@ -165,6 +210,9 @@ def generate_launch_description():
                 "publish_tf":     publish_tf,
                 "publish_marker": False,
                 "tag_tf_timeout_sec": tag_tf_timeout,
+                "tag_clock_mismatch_threshold_sec": tag_clock_mismatch_threshold,
+                "tf_reliability_max_normal_angle_deg": tf_reliability_max_normal_angle_deg,
+                "require_reliable_tf": ParameterValue(require_reliable_tf, value_type=bool),
                 "use_sim_time":   use_sim_time,
             }],
             # apriltag 側トピック名を変えている場合はここで remap も可能

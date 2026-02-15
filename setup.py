@@ -41,6 +41,7 @@ setup(
             'wall_plane_marker_node = measure_reflect_distance.wall_plane_marker_node:main',
             'pipeline_metrics_logger_node = measure_reflect_distance.pipeline_metrics_logger_node:main',
             'mirror_pointcloud_filter_node = measure_reflect_distance.mirror_pointcloud_filter_node:main',
+            'apriltag_exclusion_mask_node = measure_reflect_distance.apriltag_exclusion_mask_node:main',
         ],
     },
 )

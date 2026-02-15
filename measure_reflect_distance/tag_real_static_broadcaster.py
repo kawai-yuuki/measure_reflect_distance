@@ -65,15 +65,19 @@ class TagRealStaticBroadcaster(Node):
             f'  quat(xyzw) = [{q[0]:+.4f}, {q[1]:+.4f}, {q[2]:+.4f}, {q[3]:+.4f}]'
         )
 
-def main():
-    rclpy.init()
-    node = TagRealStaticBroadcaster()
+def main(args=None):
+    rclpy.init(args=args)
+    node = None
     try:
+        node = TagRealStaticBroadcaster()
         rclpy.spin(node)  # 常駐でOK（/tf_staticはlatchedだが、後続ノード起動の安全策として）
     except KeyboardInterrupt:
         pass
-    node.destroy_node()
-    rclpy.shutdown()
+    finally:
+        if node is not None:
+            node.destroy_node()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()
