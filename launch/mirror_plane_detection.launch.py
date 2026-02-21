@@ -41,6 +41,7 @@ def generate_launch_description():
     apriltag_masked_image_topic = LaunchConfiguration("apriltag_masked_image_topic")
     apriltag_exclude_top_ratio = LaunchConfiguration("apriltag_exclude_top_ratio")
     camera_info_topic = LaunchConfiguration("camera_info_topic")
+    apriltag_camera_info_topic = LaunchConfiguration("apriltag_camera_info_topic")
     apriltag_node_name = LaunchConfiguration("apriltag_node_name")
     plane_angle_threshold = LaunchConfiguration("plane_angle_threshold_deg")
     plane_distance_threshold = LaunchConfiguration("plane_distance_threshold")
@@ -75,8 +76,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             "apriltag_masked_image_topic",
-            default_value=TextSubstitution(text="/camera/camera/color/image_apriltag_masked"),
-            description="Apriltag 検出専用のマスク済み画像トピック（元画像は変更しない）",
+            default_value=TextSubstitution(text="/camera/camera/apriltag/image_raw"),
+            description="Apriltag 検出専用のマスク済み画像トピック（専用名前空間推奨）",
         ),
         DeclareLaunchArgument(
             "apriltag_exclude_top_ratio",
@@ -86,7 +87,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             "camera_info_topic",
             default_value=TextSubstitution(text="/camera/camera/color/camera_info"),
-            description="apriltag_ros が購読する CameraInfo トピック",
+            description="入力側 CameraInfo トピック（bag/driver の生データ）",
+        ),
+        DeclareLaunchArgument(
+            "apriltag_camera_info_topic",
+            default_value=TextSubstitution(text="/camera/camera/apriltag/camera_info"),
+            description="apriltag_ros が購読する CameraInfo トピック（masked image と同名空間）",
         ),
         DeclareLaunchArgument(
             "apriltag_node_name",
@@ -159,6 +165,23 @@ def generate_launch_description():
             }],
         ),
 
+        # --- Apriltag 用 CameraInfo 同期ノード ---
+        # masked image の stamp に合わせて CameraInfo を再配信することで
+        # image_transport の exact 同期失敗を防ぐ。
+        Node(
+            package="measure_reflect_distance",
+            executable="sync_camera_info",
+            name="apriltag_camera_info_sync",
+            output="screen",
+            parameters=[{
+                "image_topic": apriltag_masked_image_topic,
+                "source_camera_info_topic": camera_info_topic,
+                "camera_info_topic": apriltag_camera_info_topic,
+                "force_frame_id": "",
+                "use_sim_time": use_sim_time,
+            }],
+        ),
+
         # --- AprilTag Detection ノード ---
         # カメラ画像から AprilTag を検出し TF を出力
         Node(
@@ -172,7 +195,7 @@ def generate_launch_description():
             ],
             remappings=[
                 ("image_rect", apriltag_masked_image_topic),
-                ("camera_info", camera_info_topic),
+                ("camera_info", apriltag_camera_info_topic),
             ],
             emulate_tty=True,
         ),

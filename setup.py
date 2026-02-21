@@ -42,6 +42,8 @@ setup(
             'pipeline_metrics_logger_node = measure_reflect_distance.pipeline_metrics_logger_node:main',
             'mirror_pointcloud_filter_node = measure_reflect_distance.mirror_pointcloud_filter_node:main',
             'apriltag_exclusion_mask_node = measure_reflect_distance.apriltag_exclusion_mask_node:main',
+            'fix_tf_timestamps = measure_reflect_distance.util.fix_tf_timestamps:main',
+            'fix_header_stamps_to_storage = measure_reflect_distance.util.fix_header_stamps_to_storage:main',
         ],
     },
 )
